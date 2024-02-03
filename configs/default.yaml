@@ -1,0 +1,33 @@
+seed_everything: 42
+
+model:
+  class_path: model.jepa.EMAJEPA
+  init_args:
+    dim: 128
+    n_frames: 50
+    ema_alpha: 0.996
+    max_slots: 10
+    min_slots: 3
+    learning_rate: 1e-4
+    base_model: 
+      class_path: model.jepa.SlotJEPA
+      init_args:
+        dim: ${...dim}
+        n_frames: ${...n_frames}
+        max_slots: ${...max_slots}
+        backbone: resnet18.a1_in1k
+        feature_level: 2
+        decoder_depth: 1
+        predictor_depth: 4
+        fixed_point_iterations: 5
+
+data:
+  class_path: dataset.clevrer.CLEVRER
+  init_args:
+    data_dir: ./data/clevrer
+    n_frames: ${model.init_args.n_frames}
+    batch_size: 32
+    resolution: 64
+
+trainer:
+  accelerator: "mps"
