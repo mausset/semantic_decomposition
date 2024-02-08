@@ -38,12 +38,13 @@ class SlotJEPA(JEPA):
         n_frames: int,
         max_slots: int,
         fixed_point_iterations: int,
+        pretrained_backbone: bool = True,
     ):
 
         super().__init__()
 
         self.backbone = timm.create_model(
-            backbone, pretrained=True, features_only=True
+            backbone, pretrained=pretrained_backbone, features_only=True
         ).eval()
         self.feature_level = feature_level
 
@@ -148,6 +149,8 @@ class EMAJEPA(pl.LightningModule):
         max_slots,
         min_slots,
         learning_rate,
+        decoder=None,
+        detached_decoder=True,
     ):
         super().__init__()
 
@@ -160,6 +163,9 @@ class EMAJEPA(pl.LightningModule):
         self.max_slots = max_slots
         self.min_slots = min_slots
         self.learning_rate = learning_rate
+
+        self.decoder = decoder
+        self.detached_decoder = detached_decoder
 
     def _update_target(self):
         for p, p_targ in zip(
@@ -182,6 +188,18 @@ class EMAJEPA(pl.LightningModule):
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
         print(loss)
+
+        if self.decoder is not None:
+            x = rearrange(x, "b t c h w -> (b t) c h w")
+            target = rearrange(target, "b t n d -> (b t) n d")
+
+            if self.detached_decoder:
+                target = target.detach()
+
+            target = self.decoder()
+            reconstruction_loss = F.mse_loss(target, x)
+
+            loss += reconstruction_loss
 
         return loss
 
