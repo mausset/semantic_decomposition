@@ -187,7 +187,7 @@ class EMAJEPA(pl.LightningModule):
         target = self.target_model.encode(x, slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        print(loss)
+        self.log("train/loss", loss, prog_bar=True)
 
         if self.decoder is not None:
             x = rearrange(x, "b t c h w -> (b t) c h w")
@@ -195,9 +195,10 @@ class EMAJEPA(pl.LightningModule):
 
             if self.detached_decoder:
                 target = target.detach()
+            decoded_image = self.decoder(target)
 
-            target = self.decoder()
-            reconstruction_loss = F.mse_loss(target, x)
+            reconstruction_loss = F.mse_loss(decoded_image, x)
+            self.log("train/reconstruction_loss", reconstruction_loss, prog_bar=True)
 
             loss += reconstruction_loss
 
@@ -208,4 +209,4 @@ class EMAJEPA(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        self.update_target()
+        self._update_target()
