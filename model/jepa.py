@@ -4,6 +4,7 @@ from copy import deepcopy
 import lightning as pl
 import timm
 import torch
+import wandb
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
@@ -150,7 +151,7 @@ class EMAJEPA(pl.LightningModule):
         min_slots,
         learning_rate,
         decoder=None,
-        detached_decoder=True,
+        decoder_detach=True,
     ):
         super().__init__()
 
@@ -165,7 +166,7 @@ class EMAJEPA(pl.LightningModule):
         self.learning_rate = learning_rate
 
         self.decoder = decoder
-        self.detached_decoder = detached_decoder
+        self.decoder_detach = decoder_detach
 
     def _update_target(self):
         for p, p_targ in zip(
@@ -193,16 +194,46 @@ class EMAJEPA(pl.LightningModule):
             x = rearrange(x, "b t c h w -> (b t) c h w")
             target = rearrange(target, "b t n d -> (b t) n d")
 
-            if self.detached_decoder:
+            if self.decoder_detach:
                 target = target.detach()
             decoded_image = self.decoder(target)
 
             reconstruction_loss = F.mse_loss(decoded_image, x)
             self.log("train/reconstruction_loss", reconstruction_loss, prog_bar=True)
+            sample = torch.cat((x[0], decoded_image[0]), dim=2)
+            self.logger.experiment.log({"train/sample": [wandb.Image(sample)]})
 
             loss += reconstruction_loss
 
         return loss
+
+    def validation_step(self, x):
+        n_slots = torch.randint(self.min_slots, self.max_slots, (1,)).item()
+        slots = torch.normal(
+            mean=0, std=1, size=(x.shape[0], n_slots, self.dim), device=x.device
+        )
+        slots = repeat(slots, "b n d -> b t n d", t=self.n_frames)
+
+        context = self.context_model.encode(x, slots)
+        pred = self.context_model.predict(context)
+        target = self.target_model.encode(x, slots)
+
+        loss = F.mse_loss(pred[:, :-1], target[:, 1:])
+        self.log("val/loss", loss, prog_bar=True)
+
+        if self.decoder is not None:
+            x = rearrange(x, "b t c h w -> (b t) c h w")
+            target = rearrange(target, "b t n d -> (b t) n d")
+
+            if self.decoder_detach:
+                target = target.detach()
+            decoded_image = self.decoder(target)
+
+            reconstruction_loss = F.mse_loss(decoded_image, x)
+            self.log("val/reconstruction_loss", reconstruction_loss, prog_bar=True)
+
+            sample = torch.cat((x[0], decoded_image[0]), dim=2)
+            self.logger.experiment.log({"val/sample": [wandb.Image(sample)]})
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=self.learning_rate)

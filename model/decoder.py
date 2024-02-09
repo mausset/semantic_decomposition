@@ -1,8 +1,6 @@
 import lightning as pl
 from einops import rearrange, repeat
-from positional_encodings.torch_encodings import (
-    PositionalEncoding2DPermute,
-)
+from positional_encodings.torch_encodings import PositionalEncodingPermute2D
 from torch import nn
 from torch.nn import functional as F
 
@@ -26,7 +24,7 @@ class SpatialBroadcastDecoder(pl.LightningModule):
             in_channels=dim, out_channels=4, kernel_size=3, padding=1
         )
 
-        self.pos_enc = PositionalEncoding2DPermute(dim)
+        self.pos_enc = PositionalEncodingPermute2D(dim)
 
     def forward(self, x):
         """
