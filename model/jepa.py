@@ -201,7 +201,7 @@ class EMAJEPA(pl.LightningModule):
             reconstruction_loss = F.mse_loss(decoded_image, x)
             self.log("train/reconstruction_loss", reconstruction_loss, prog_bar=True)
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            self.logger.experiment.log({"train/sample": [wandb.Image(sample)]})
+            self.logger.log_image(key="train/sample", images=[sample])
 
             loss += reconstruction_loss
 
