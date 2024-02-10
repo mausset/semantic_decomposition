@@ -176,7 +176,6 @@ class EMAJEPA(pl.LightningModule):
             p_targ.data.mul_(self.ema_alpha).add_(p.data, alpha=1 - self.ema_alpha)
 
     def training_step(self, x):
-        print(self.global_step)
         n_slots = torch.randint(self.min_slots, self.max_slots, (1,)).item()
         slots = torch.normal(
             mean=0, std=1, size=(x.shape[0], n_slots, self.dim), device=x.device
