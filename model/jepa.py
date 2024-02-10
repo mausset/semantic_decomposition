@@ -189,7 +189,7 @@ class EMAJEPA(pl.LightningModule):
         target = self.target_model.encode(x, slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
 
         if self.decoder is not None:
             x = rearrange(x, "b t c h w -> (b t) c h w")
@@ -200,7 +200,12 @@ class EMAJEPA(pl.LightningModule):
             decoded_image = self.decoder(target)
 
             reconstruction_loss = F.mse_loss(decoded_image, x)
-            self.log("train/reconstruction_loss", reconstruction_loss, prog_bar=True)
+            self.log(
+                "train/reconstruction_loss",
+                reconstruction_loss,
+                prog_bar=True,
+                sync_dist=True,
+            )
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
             if (self.global_step + 1) % (
                 self.trainer.log_every_n_steps
@@ -224,7 +229,7 @@ class EMAJEPA(pl.LightningModule):
         target = self.target_model.encode(x, slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/loss", loss, sync_dist=True)
 
         if self.decoder is not None:
             x = rearrange(x, "b t c h w -> (b t) c h w")
@@ -235,14 +240,10 @@ class EMAJEPA(pl.LightningModule):
             decoded_image = self.decoder(target)
 
             reconstruction_loss = F.mse_loss(decoded_image, x)
-            self.log("val/reconstruction_loss", reconstruction_loss, prog_bar=True)
+            self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
 
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            if (self.global_step + 1) % (
-                self.trainer.log_every_n_steps
-            ) == 0 and self.global_step != self.last_global_step:
-                self.last_global_step = self.global_step
-                self.logger.log_image(key="train/sample", images=[sample])
+            self.logger.log_image(key="train/sample", images=[sample])
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=self.learning_rate)
