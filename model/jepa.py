@@ -201,7 +201,9 @@ class EMAJEPA(pl.LightningModule):
             reconstruction_loss = F.mse_loss(decoded_image, x)
             self.log("train/reconstruction_loss", reconstruction_loss, prog_bar=True)
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            if (self.global_step + 1) % self.trainer.log_every_n_steps == 0:
+            if (self.global_step + 1) % (
+                self.trainer.log_every_n_steps * self.trainer.accumulate_grad_batches
+            ) == 0:
                 self.logger.log_image(key="train/sample", images=[sample])
 
             loss += reconstruction_loss
@@ -234,7 +236,9 @@ class EMAJEPA(pl.LightningModule):
             self.log("val/reconstruction_loss", reconstruction_loss, prog_bar=True)
 
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            if (self.global_step + 1) % self.trainer.log_every_n_steps == 0:
+            if (self.global_step + 1) % (
+                self.trainer.log_every_n_steps * self.trainer.accumulate_grad_batches
+            ) == 0:
                 self.logger.log_image(key="train/sample", images=[sample])
 
     def configure_optimizers(self):
