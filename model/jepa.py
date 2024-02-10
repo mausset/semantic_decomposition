@@ -4,7 +4,6 @@ from copy import deepcopy
 import lightning as pl
 import timm
 import torch
-import wandb
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
