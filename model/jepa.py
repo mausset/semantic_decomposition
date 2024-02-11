@@ -194,6 +194,12 @@ class EMAJEPA(pl.LightningModule):
                 self.last_global_step = self.global_step
                 self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
 
+                decoded_components = self.decoder.forward_components(target)[0]
+                component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+                self.logger.log_image(
+                    key="train/decoded_components", images=[component_img.clip(0, 1)]
+                )
+
             loss += reconstruction_loss
 
         return loss
