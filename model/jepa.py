@@ -6,7 +6,6 @@ import torch
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
-    PositionalEncoding2D,
 )
 from torch.nn import functional as F
 from torch.optim import AdamW
@@ -46,7 +45,6 @@ class SlotJEPA(JEPA):
         self.max_slots = max_slots
         self.fixed_point_iterations = fixed_point_iterations
 
-        self.img_pos_enc = PositionalEncoding2D(dim)
         self.slot_pos_enc = PositionalEncoding1D(dim)
 
         self.encoder = ContinuousTransformerWrapper(
