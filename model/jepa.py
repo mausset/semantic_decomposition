@@ -53,7 +53,8 @@ class SlotJEPA(JEPA):
                 dim=dim,
                 depth=decoder_depth,
                 abs_pos_emb=False,
-                ffn_glu=True,
+                ff_glu=True,
+                ff_swish=True,
                 cross_attend=True,
             ),
         )
@@ -65,6 +66,7 @@ class SlotJEPA(JEPA):
                 depth=predictor_depth,
                 abs_pos_emb=False,
                 ff_glu=True,
+                ff_swish=True,
             ),
         )
 
