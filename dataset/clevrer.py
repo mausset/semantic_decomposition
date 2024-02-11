@@ -4,7 +4,7 @@ import lightning as pl
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image
-from torchvision.transforms import Compose, Normalize, Resize
+from torchvision.transforms import Compose, Resize, CenterCrop
 
 FPS = 25
 SECONDS = 5.12
@@ -23,7 +23,7 @@ class CLEVRERDataset(Dataset):
 
         self.db = self._load_db()
 
-        self.transform = Compose([Normalize((0.5,), (0.5,)), Resize(resolution)])
+        self.transform = Compose([Resize(resolution), CenterCrop(resolution)])
 
     def _load_db(self):
         db = []

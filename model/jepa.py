@@ -2,14 +2,12 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 
 import lightning as pl
-import timm
 import torch
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
     PositionalEncoding2D,
 )
-from torch import nn
 from torch.nn import functional as F
 from torch.optim import AdamW
 from x_transformers import ContinuousTransformerWrapper, Encoder
@@ -30,32 +28,23 @@ class SlotJEPA(JEPA):
 
     def __init__(
         self,
-        backbone: str,
-        feature_level: int,
+        backbone,
         dim: int,
         decoder_depth: int,
         predictor_depth: int,
         n_frames: int,
         max_slots: int,
         fixed_point_iterations: int,
-        pretrained_backbone: bool = True,
     ):
 
         super().__init__()
 
-        self.backbone = timm.create_model(
-            backbone, pretrained=pretrained_backbone, features_only=True
-        ).eval()
-        self.feature_level = feature_level
+        self.backbone = backbone
 
         self.dim = dim
         self.n_frames = n_frames
         self.max_slots = max_slots
         self.fixed_point_iterations = fixed_point_iterations
-
-        self.projector = nn.Linear(
-            self.backbone.feature_info.channels()[feature_level], dim
-        )
 
         self.img_pos_enc = PositionalEncoding2D(dim)
         self.slot_pos_enc = PositionalEncoding1D(dim)
@@ -91,19 +80,13 @@ class SlotJEPA(JEPA):
         """
 
         images = rearrange(images, "b t c h w -> (b t) c h w")
-
-        features = self.backbone(images)[self.feature_level]
-        features = rearrange(features, "bt c h w -> bt h w c")
-        features = self.projector(features)
-
-        features = features + self.img_pos_enc(features)
-        features = rearrange(features, "bt h w c -> bt (h w) c")
+        features = self.backbone(images)
+        features = rearrange(features, "bt c h w -> bt (h w) c")
 
         slots = rearrange(slots, "b t n dim -> (b t) n dim")
         for _ in range(self.fixed_point_iterations - 1):
             slots = self.encoder(slots, context=features)
         self.encoder(slots.detach(), context=features)
-
         slots = rearrange(slots, "(b t) n dim -> b t n dim", t=self.n_frames)
 
         return slots
@@ -211,7 +194,7 @@ class EMAJEPA(pl.LightningModule):
                 self.trainer.log_every_n_steps
             ) == 0 and self.global_step != self.last_global_step:
                 self.last_global_step = self.global_step
-                self.logger.log_image(key="train/sample", images=[sample])
+                self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
 
             loss += reconstruction_loss
 
@@ -243,7 +226,15 @@ class EMAJEPA(pl.LightningModule):
             self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
 
             sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            self.logger.log_image(key="train/sample", images=[sample])
+            self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
+
+            decoded_components = self.decoder.forward_components(target)[0]
+
+            component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+
+            self.logger.log_image(
+                key="val/decoded_components", images=[component_img.clip(0, 1)]
+            )
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=self.learning_rate)
