@@ -42,6 +42,8 @@ class SlotJEPA(JEPA):
 
         self.slot_pos_enc = PositionalEncoding1D(dim)
 
+        self.norm = nn.LayerNorm(dim)
+
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim),
             nn.GELU(),
@@ -73,7 +75,7 @@ class SlotJEPA(JEPA):
         images = rearrange(images, "b t c h w -> (b t) c h w")
         features = self.image_encoder(images)
         features = rearrange(features, "bt c h w -> bt (h w) c")
-        features = self.ffn(features)
+        features = self.ffn(self.norm(features))
 
         slots, init_slots = self.slot_attention(features, slots, time=t)
 
