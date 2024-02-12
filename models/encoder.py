@@ -11,13 +11,15 @@ class ResNetEncoder(pl.LightningModule):
         super().__init__()
         self.dim = dim
         self.depth = depth
+        self.stride_layers = (1, 2)
         self.convs = nn.ModuleList(
             [
                 nn.Conv2d(
                     in_channels=3 if not i else dim,
                     out_channels=dim,
                     kernel_size=5,
-                    padding="same",
+                    stride=2 if i in self.stride_layers else 1,
+                    padding=2 if i in self.stride_layers else "same",
                 )
                 for i in range(depth)
             ]
@@ -36,10 +38,7 @@ class ResNetEncoder(pl.LightningModule):
         """
 
         for conv in self.convs:
-            if conv.in_channels == 3:
-                x = F.relu(conv(x))
-            else:
-                x = F.relu(conv(x)) + x
+            x = F.relu(conv(x))
 
         grid = make_grid(x.shape[-2:], device=x.device)
         grid = repeat(grid, "b h w c -> (b r) h w c", r=x.shape[0])

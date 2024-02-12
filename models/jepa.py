@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
+from torch import nn
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
@@ -27,50 +28,38 @@ class SlotJEPA(JEPA):
 
     def __init__(
         self,
-        backbone,
+        image_encoder: pl.LightningModule,
+        slot_attention: pl.LightningModule,
         dim: int,
-        decoder_depth: int,
         predictor_depth: int,
-        n_frames: int,
-        max_slots: int,
-        fixed_point_iterations: int,
     ):
 
         super().__init__()
 
-        self.backbone = backbone
-
+        self.image_encoder = image_encoder
+        self.slot_attention = slot_attention
         self.dim = dim
-        self.n_frames = n_frames
-        self.max_slots = max_slots
-        self.fixed_point_iterations = fixed_point_iterations
 
         self.slot_pos_enc = PositionalEncoding1D(dim)
 
-        self.encoder = ContinuousTransformerWrapper(
-            max_seq_len=max_slots,
-            attn_layers=Encoder(
-                dim=dim,
-                depth=decoder_depth,
-                abs_pos_emb=False,
-                ff_glu=True,
-                ff_swish=True,
-                cross_attend=True,
-            ),
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
         )
 
         self.predictor = ContinuousTransformerWrapper(
-            max_seq_len=max_slots * n_frames,
+            max_seq_len=None,
             attn_layers=Encoder(
                 dim=dim,
                 depth=predictor_depth,
-                abs_pos_emb=False,
                 ff_glu=True,
                 ff_swish=True,
             ),
+            use_abs_pos_emb=False,
         )
 
-    def encode(self, images, slots):
+    def encode(self, images, slots=None):
         """
         args:
             images: (b, t, 3, h, w)
@@ -79,17 +68,16 @@ class SlotJEPA(JEPA):
             slots: (b, t, n, dim)
         """
 
+        _, t, _, _, _ = images.shape
+
         images = rearrange(images, "b t c h w -> (b t) c h w")
-        features = self.backbone(images)
+        features = self.image_encoder(images)
         features = rearrange(features, "bt c h w -> bt (h w) c")
+        features = self.ffn(features)
 
-        slots = rearrange(slots, "b t n dim -> (b t) n dim")
-        for _ in range(self.fixed_point_iterations - 1):
-            slots = self.encoder(slots, context=features)
-        self.encoder(slots.detach(), context=features)
-        slots = rearrange(slots, "(b t) n dim -> b t n dim", t=self.n_frames)
+        slots, init_slots = self.slot_attention(features, slots, time=t)
 
-        return slots
+        return slots, init_slots
 
     def _create_attn_mask(self, slots):
         _, t, n, _ = slots.shape
@@ -108,15 +96,17 @@ class SlotJEPA(JEPA):
         returns:
             slots: (b, t, n, dim)
         """
+        _, _, n, _ = slots.shape
+
         attn_mask = self._create_attn_mask(slots)
 
         pos_enc = self.slot_pos_enc(slots[:, :, 0])
-        pos_enc = repeat(pos_enc, "b t dim -> b (t n) dim", n=slots.shape[-2])
+        pos_enc = repeat(pos_enc, "b t dim -> b (t n) dim", n=n)
         slots = rearrange(slots, "b t n dim -> b (t n) dim")
         slots = slots + pos_enc
 
         slots = self.predictor(slots, attn_mask=attn_mask)
-        slots = rearrange(slots, "b (t n) dim -> b t n dim", t=self.n_frames)
+        slots = rearrange(slots, "b (t n) dim -> b t n dim", n=n)
 
         return slots
 
@@ -127,10 +117,7 @@ class EMAJEPA(pl.LightningModule):
         self,
         base_model: JEPA,
         dim,
-        n_frames,
         ema_alpha,
-        max_slots,
-        min_slots,
         learning_rate,
         decoder=None,
         decoder_detach=True,
@@ -141,16 +128,13 @@ class EMAJEPA(pl.LightningModule):
         self.target_model = deepcopy(self.context_model).requires_grad_(False)
 
         self.dim = dim
-        self.n_frames = n_frames
         self.ema_alpha = ema_alpha
-        self.max_slots = max_slots
-        self.min_slots = min_slots
         self.learning_rate = learning_rate
 
         self.decoder = decoder
         self.decoder_detach = decoder_detach
 
-        self.last_global_step = 0
+        self.last_global_step = 0  # for logging
 
     def _update_target(self):
         for p, p_targ in zip(
@@ -161,15 +145,10 @@ class EMAJEPA(pl.LightningModule):
             p_targ.data.mul_(self.ema_alpha).add_(p.data, alpha=1 - self.ema_alpha)
 
     def training_step(self, x):
-        n_slots = torch.randint(self.min_slots, self.max_slots, (1,)).item()
-        slots = torch.normal(
-            mean=0, std=1, size=(x.shape[0], n_slots, self.dim), device=x.device
-        )
-        slots = repeat(slots, "b n d -> b t n d", t=self.n_frames)
 
-        context = self.context_model.encode(x, slots)
+        context, init_slots = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        target = self.target_model.encode(x, slots)
+        target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
@@ -207,15 +186,10 @@ class EMAJEPA(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        n_slots = torch.randint(self.min_slots, self.max_slots, (1,)).item()
-        slots = torch.normal(
-            mean=0, std=1, size=(x.shape[0], n_slots, self.dim), device=x.device
-        )
-        slots = repeat(slots, "b n d -> b t n d", t=self.n_frames)
 
-        context = self.context_model.encode(x, slots)
+        context, init_slots = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        target = self.target_model.encode(x, slots)
+        target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
         self.log("val/loss", loss, sync_dist=True)

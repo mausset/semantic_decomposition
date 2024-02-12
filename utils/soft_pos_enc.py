@@ -10,6 +10,7 @@ def make_grid(resolution, device=None):
         torch.meshgrid(
             torch.linspace(0, 1, h, device=device),
             torch.linspace(0, 1, w, device=device),
+            indexing="ij",
         ),
         dim=-1,
     )
