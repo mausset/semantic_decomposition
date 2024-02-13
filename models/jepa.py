@@ -3,11 +3,11 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
-from torch import nn
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
 )
+from torch import nn
 from torch.nn import functional as F
 from torch.optim import AdamW
 from x_transformers import ContinuousTransformerWrapper, Encoder

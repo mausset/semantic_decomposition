@@ -15,11 +15,11 @@ model:
             dim: ${.....dim}
             depth: 4
         slot_attention:
-          class_path: models.slot_attention.ISARecurrent
+          class_path: models.slot_attention.ICASA
           init_args:
             input_dim: ${.....dim}
             slot_dim: ${.....dim}
-            n_iters: 4
+            depth: 4
             n_slots: 7
         dim: ${...dim}
         predictor_depth: 4

@@ -4,6 +4,8 @@ from torch import nn
 from torch.nn import functional as F
 from einops import rearrange, repeat
 
+from x_transformers import Encoder
+
 
 class ISA(pl.LightningModule):
 
@@ -173,3 +175,88 @@ class ISARecurrent(pl.LightningModule):
         slots = torch.stack(results, dim=1)
 
         return slots, init_slots.detach()
+
+
+class ICASALayer(pl.LightningModule):
+    "Transformer layer with inverted cross attention."
+
+    def __init__(self, input_dim, slot_dim, eps=1e-8):
+        super().__init__()
+        self.in_dim = input_dim
+        self.slot_dim = slot_dim
+        self.eps = eps
+
+        self.scale = input_dim**-0.5
+
+        self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
+        self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
+        self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
+
+        self.slot_norm = nn.LayerNorm(slot_dim)
+
+        self.encoder_transformer = Encoder(
+            dim=slot_dim, depth=1, ff_glu=True, ff_dropout=0.0
+        )
+
+    def forward(self, x, slots):
+
+        q = self.inv_cross_q(self.slot_norm(slots))
+        k = self.inv_cross_k(x)
+        v = self.inv_cross_v(x)
+
+        dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+        attn = dots.softmax(dim=1) + self.eps
+
+        attn = attn / attn.sum(dim=-1, keepdim=True)
+
+        updates = torch.einsum("bjd,bij->bid", v, attn)
+
+        slots = self.slot_norm(slots + updates)
+        slots = self.encoder_transformer(updates)
+
+        return slots
+
+
+class ICASA(pl.LightningModule):
+
+    def __init__(self, input_dim, slot_dim, depth, n_slots=5, eps=1e-8):
+        super().__init__()
+
+        self.in_dim = input_dim
+        self.slot_dim = slot_dim
+        self.depth = depth
+        self.n_slots = n_slots
+        self.eps = eps
+
+        self.mu = nn.Parameter(torch.randn(slot_dim))
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, slot_dim))
+        nn.init.xavier_uniform_(self.slots_logsigma)
+        self.slots_logsigma = nn.Parameter(self.slots_logsigma.squeeze())
+
+        self.layers = nn.ModuleList(
+            [ICASALayer(input_dim, slot_dim, eps) for _ in range(depth)]
+        )
+
+    def forward(self, x, init_slots):
+        if init_slots is None:
+            init_slots = self.mu + self.slots_logsigma.exp() * torch.randn(
+                (x.shape[0], self.n_slots, self.slot_dim), device=x.device
+            )
+        slots = init_slots.clone()
+
+        results = []
+        for i in range(x.shape[1]):
+            slots = self.non_recurrent(x[:, i], slots)
+            results.append(slots)
+
+            slots = slots.detach()
+
+        slots = torch.stack(results, dim=1)
+        return slots, init_slots
+
+    def non_recurrent(self, x, slots):
+
+        for layer in self.layers:
+            slots = layer(x, slots)
+
+        return slots
