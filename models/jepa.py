@@ -155,8 +155,9 @@ class EMAJEPA(pl.LightningModule):
         target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        mean_norm = torch.mean(torch.norm(context, dim=-1))
-        mean_spread = (torch.var(context, dim=-1) / mean_norm).mean()
+        flattened_context = rearrange(context, "b t n d -> (b t n) d")
+        mean_norm = torch.mean(torch.norm(flattened_context, dim=0))
+        mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
@@ -203,8 +204,9 @@ class EMAJEPA(pl.LightningModule):
         target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        mean_norm = torch.mean(torch.norm(context, dim=-1))
-        mean_spread = (torch.var(context, dim=-1) / mean_norm).mean()
+        flattened_context = rearrange(context, "b t n d -> (b t n) d")
+        mean_norm = torch.mean(torch.norm(flattened_context, dim=0))
+        mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
 
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
