@@ -118,8 +118,8 @@ class ISARecurrent(pl.LightningModule):
 
         self.input_norm = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
-        self.norm_ffn = nn.LayerNorm(slot_dim)
-        self.norm_recurrent = nn.LayerNorm(slot_dim)
+        self.norm_pre_ffn = nn.LayerNorm(slot_dim)
+        self.norm_post_ffn = nn.LayerNorm(slot_dim)
 
     def step(self, slots, k, v):
         _, n, _ = slots.shape
@@ -136,7 +136,7 @@ class ISARecurrent(pl.LightningModule):
         updates = rearrange(updates, "(b n) d -> b n d", n=n)
         slots = rearrange(slots, "(b n) d -> b n d", n=n)
 
-        slots = slots + self.ffn(self.norm_ffn(slots))
+        slots = self.norm_post_ffn(slots + self.ffn(self.norm_pre_ffn(slots)))
 
         return slots
 
@@ -168,7 +168,7 @@ class ISARecurrent(pl.LightningModule):
         for i in range(t):
             slots = self.iterate(slots, k[:, i], v[:, i])
             results.append(slots)
-            slots = self.norm_recurrent(slots.detach())  # Maybe not necessary
+            slots = slots.detach()  # Maybe not necessary
 
         slots = torch.stack(results, dim=1)
 

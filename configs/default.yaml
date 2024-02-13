@@ -30,6 +30,7 @@ model:
         depth: 6
         init_resolution: [8, 8]
     decoder_detach: True
+    decoder_start_epoch: 3
 
 data:
   class_path: dataset.clevrer.CLEVRER

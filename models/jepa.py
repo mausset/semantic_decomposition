@@ -123,6 +123,7 @@ class EMAJEPA(pl.LightningModule):
         learning_rate,
         decoder=None,
         decoder_detach=True,
+        decoder_start_epoch=0,
     ):
         super().__init__()
 
@@ -135,6 +136,7 @@ class EMAJEPA(pl.LightningModule):
 
         self.decoder = decoder
         self.decoder_detach = decoder_detach
+        self.decoder_start_epoch = decoder_start_epoch
 
         self.last_global_step = 0  # for logging
 
@@ -160,35 +162,37 @@ class EMAJEPA(pl.LightningModule):
         self.log("train/mean_norm", mean_norm, sync_dist=True)
         self.log("train/mean_spread", mean_spread, sync_dist=True)
 
-        if self.decoder is not None:
-            x = rearrange(x, "b t c h w -> (b t) c h w")
-            target = rearrange(target, "b t n d -> (b t) n d")
+        if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
+            return loss
 
-            if self.decoder_detach:
-                target = target.detach()
-            decoded_image = self.decoder(target)
+        x = rearrange(x, "b t c h w -> (b t) c h w")
+        target = rearrange(target, "b t n d -> (b t) n d")
 
-            reconstruction_loss = F.mse_loss(decoded_image, x)
-            self.log(
-                "train/reconstruction_loss",
-                reconstruction_loss,
-                prog_bar=True,
-                sync_dist=True,
+        if self.decoder_detach:
+            target = target.detach()
+        decoded_image = self.decoder(target)
+
+        reconstruction_loss = F.mse_loss(decoded_image, x)
+        self.log(
+            "train/reconstruction_loss",
+            reconstruction_loss,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        sample = torch.cat((x[0], decoded_image[0]), dim=2)
+        if (self.global_step + 1) % (
+            self.trainer.log_every_n_steps
+        ) == 0 and self.global_step != self.last_global_step:
+            self.last_global_step = self.global_step
+            self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
+
+            decoded_components = self.decoder.forward_components(target)[0]
+            component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+            self.logger.log_image(
+                key="train/decoded_components", images=[component_img.clip(0, 1)]
             )
-            sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            if (self.global_step + 1) % (
-                self.trainer.log_every_n_steps
-            ) == 0 and self.global_step != self.last_global_step:
-                self.last_global_step = self.global_step
-                self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
 
-                decoded_components = self.decoder.forward_components(target)[0]
-                component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
-                self.logger.log_image(
-                    key="train/decoded_components", images=[component_img.clip(0, 1)]
-                )
-
-            loss += reconstruction_loss
+        loss += reconstruction_loss
 
         return loss
 
@@ -206,27 +210,29 @@ class EMAJEPA(pl.LightningModule):
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
 
-        if self.decoder is not None:
-            x = rearrange(x, "b t c h w -> (b t) c h w")
-            target = rearrange(target, "b t n d -> (b t) n d")
+        if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
+            return
 
-            if self.decoder_detach:
-                target = target.detach()
-            decoded_image = self.decoder(target)
+        x = rearrange(x, "b t c h w -> (b t) c h w")
+        target = rearrange(target, "b t n d -> (b t) n d")
 
-            reconstruction_loss = F.mse_loss(decoded_image, x)
-            self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
+        if self.decoder_detach:
+            target = target.detach()
+        decoded_image = self.decoder(target)
 
-            sample = torch.cat((x[0], decoded_image[0]), dim=2)
-            self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
+        reconstruction_loss = F.mse_loss(decoded_image, x)
+        self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
 
-            decoded_components = self.decoder.forward_components(target)[0]
+        sample = torch.cat((x[0], decoded_image[0]), dim=2)
+        self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
 
-            component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+        decoded_components = self.decoder.forward_components(target)[0]
 
-            self.logger.log_image(
-                key="val/decoded_components", images=[component_img.clip(0, 1)]
-            )
+        component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+
+        self.logger.log_image(
+            key="val/decoded_components", images=[component_img.clip(0, 1)]
+        )
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=self.learning_rate)
