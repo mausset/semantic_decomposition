@@ -61,7 +61,7 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-    def encode(self, images, slots=None):
+    def encode(self, images, init_slots=None):
         """
         args:
             images: (b, t, 3, h, w)
@@ -74,10 +74,10 @@ class SlotJEPA(JEPA):
 
         images = rearrange(images, "b t c h w -> (b t) c h w")
         features = self.image_encoder(images)
-        features = rearrange(features, "bt c h w -> bt (h w) c")
+        features = rearrange(features, "(b t) c h w -> b t (h w) c", t=t)
         features = self.ffn(self.norm(features))
 
-        slots, init_slots = self.slot_attention(features, slots, time=t)
+        slots, init_slots = self.slot_attention(features, init_slots=init_slots)
 
         return slots, init_slots
 
@@ -153,7 +153,12 @@ class EMAJEPA(pl.LightningModule):
         target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
+        mean_norm = torch.mean(torch.norm(context, dim=-1))
+        mean_spread = (torch.var(context, dim=-1) / mean_norm).mean()
+
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
+        self.log("train/mean_norm", mean_norm, sync_dist=True)
+        self.log("train/mean_spread", mean_spread, sync_dist=True)
 
         if self.decoder is not None:
             x = rearrange(x, "b t c h w -> (b t) c h w")
@@ -194,7 +199,12 @@ class EMAJEPA(pl.LightningModule):
         target, _ = self.target_model.encode(x, init_slots)
 
         loss = F.mse_loss(pred[:, :-1], target[:, 1:])
-        self.log("val/loss", loss, sync_dist=True)
+        mean_norm = torch.mean(torch.norm(context, dim=-1))
+        mean_spread = (torch.var(context, dim=-1) / mean_norm).mean()
+
+        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
+        self.log("val/mean_norm", mean_norm, sync_dist=True)
+        self.log("val/mean_spread", mean_spread, sync_dist=True)
 
         if self.decoder is not None:
             x = rearrange(x, "b t c h w -> (b t) c h w")

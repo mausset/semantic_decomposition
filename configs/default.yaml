@@ -15,7 +15,7 @@ model:
             dim: ${.....dim}
             depth: 4
         slot_attention:
-          class_path: models.slot_attention.ImplicitSlotAttention
+          class_path: models.slot_attention.ISARecurrent
           init_args:
             input_dim: ${.....dim}
             slot_dim: ${.....dim}
