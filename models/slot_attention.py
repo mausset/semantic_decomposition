@@ -238,6 +238,21 @@ class ICASA(pl.LightningModule):
         )
 
     def forward(self, x, sample):
+        b, t, _, _ = x.shape
+
+        if sample is None:
+            sample = torch.randn((b, t, self.n_slots, self.slot_dim), device=x.device)
+        slots = self.mu + self.slots_logsigma.exp() * sample
+
+        slots = rearrange(slots, "b t n d -> (b t) n d")
+        x = rearrange(x, "b t n d -> (b t) n d")
+        for layer in self.layers:
+            slots = layer(x, slots)
+        slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
+
+        return slots, sample
+
+    def recurrent(self, x, sample):
 
         if sample is None:
             sample = torch.randn(
@@ -247,17 +262,11 @@ class ICASA(pl.LightningModule):
         slots = self.mu + self.slots_logsigma.exp() * sample
         results = []
         for i in range(x.shape[1]):
-            slots = self.non_recurrent(x[:, i], slots)
+            for layer in self.layers:
+                slots = layer(x[:, i], slots)
             results.append(slots)
 
             slots = slots.detach()
 
         slots = torch.stack(results, dim=1)
         return slots, sample
-
-    def non_recurrent(self, x, slots):
-
-        for layer in self.layers:
-            slots = layer(x, slots)
-
-        return slots

@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
 )
@@ -61,6 +61,17 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
+        self.summarizer = ContinuousTransformerWrapper(
+            max_seq_len=None,
+            attn_layers=Encoder(
+                dim=dim,
+                depth=4,
+                ff_glu=True,
+                ff_swish=True,
+            ),
+            use_abs_pos_emb=False,
+        )
+
     def encode(self, images, sample=None):
         """
         args:
@@ -112,6 +123,20 @@ class SlotJEPA(JEPA):
 
         return slots
 
+    def summarize(self, slots):
+        """
+        args:
+            slots: (b, t, n, dim)
+        returns:
+            context: (b, t, dim)
+        """
+        _, t, _, _ = slots.shape
+        slots = rearrange(slots, "b t n dim -> (b t) n dim")
+        slots = self.summarizer(slots)
+        summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
+
+        return summary
+
 
 class EMAJEPA(pl.LightningModule):
 
@@ -152,12 +177,11 @@ class EMAJEPA(pl.LightningModule):
 
         context, sample = self.context_model.encode(x)
         pred = self.context_model.predict(context)
+        summary_pred = self.context_model.summarize(pred)
         target, _ = self.target_model.encode(x, sample)
+        summary_target = self.target_model.summarize(target)
 
-        pred_ = rearrange(pred[:, :-1], "b t n d -> (b t n) d")
-        target_ = rearrange(target[:, 1:], "b t n d -> (b t n) d")
-
-        loss = F.mse_loss(pred_, target_)
+        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
@@ -202,11 +226,14 @@ class EMAJEPA(pl.LightningModule):
 
     def validation_step(self, x):
 
-        context, init_slots = self.context_model.encode(x)
+        context, sample = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        target, _ = self.target_model.encode(x, init_slots)
+        summary_pred = self.context_model.summarize(pred)
+        target, _ = self.target_model.encode(x, sample)
+        summary_target = self.target_model.summarize(target)
 
-        loss = F.mse_loss(pred[:, :-1], target[:, 1:])
+        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
