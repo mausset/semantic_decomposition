@@ -61,7 +61,7 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-    def encode(self, images, init_slots=None):
+    def encode(self, images, sample=None):
         """
         args:
             images: (b, t, 3, h, w)
@@ -77,7 +77,7 @@ class SlotJEPA(JEPA):
         features = rearrange(features, "(b t) c h w -> b t (h w) c", t=t)
         features = self.ffn(self.norm(features))
 
-        slots, init_slots = self.slot_attention(features, init_slots=init_slots)
+        slots, init_slots = self.slot_attention(features, sample=sample)
 
         return slots, init_slots
 
@@ -150,11 +150,14 @@ class EMAJEPA(pl.LightningModule):
 
     def training_step(self, x):
 
-        context, init_slots = self.context_model.encode(x)
+        context, sample = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        target, _ = self.target_model.encode(x, init_slots)
+        target, _ = self.target_model.encode(x, sample)
 
-        loss = F.mse_loss(pred[:, :-1], target[:, 1:])
+        pred_ = rearrange(pred[:, :-1], "b t n d -> (b t n) d")
+        target_ = rearrange(target[:, 1:], "b t n d -> (b t n) d")
+
+        loss = F.mse_loss(pred_, target_)
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
