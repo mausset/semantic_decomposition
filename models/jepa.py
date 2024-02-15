@@ -61,16 +61,16 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-        self.summarizer = ContinuousTransformerWrapper(
-            max_seq_len=None,
-            attn_layers=Encoder(
-                dim=dim,
-                depth=4,
-                ff_glu=True,
-                ff_swish=True,
-            ),
-            use_abs_pos_emb=False,
-        )
+        # self.summarizer = ContinuousTransformerWrapper(
+        #     max_seq_len=None,
+        #     attn_layers=Encoder(
+        #         dim=dim,
+        #         depth=4,
+        #         ff_glu=True,
+        #         ff_swish=True,
+        #     ),
+        #     use_abs_pos_emb=False,
+        # )
 
     def encode(self, images, sample=None):
         """
@@ -88,7 +88,7 @@ class SlotJEPA(JEPA):
         features = rearrange(features, "(b t) c h w -> b t (h w) c", t=t)
         features = self.ffn(self.norm(features))
 
-        slots, init_slots = self.slot_attention(features, sample=sample)
+        slots, init_slots = self.slot_attention.recurrent(features, init_slots=sample)
 
         return slots, init_slots
 
@@ -123,19 +123,19 @@ class SlotJEPA(JEPA):
 
         return slots
 
-    def summarize(self, slots):
-        """
-        args:
-            slots: (b, t, n, dim)
-        returns:
-            context: (b, t, dim)
-        """
-        _, t, _, _ = slots.shape
-        slots = rearrange(slots, "b t n dim -> (b t) n dim")
-        slots = self.summarizer(slots)
-        summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
-
-        return summary
+    # def summarize(self, slots):
+    #     """
+    #     args:
+    #         slots: (b, t, n, dim)
+    #     returns:
+    #         context: (b, t, dim)
+    #     """
+    #     _, t, _, _ = slots.shape
+    #     slots = rearrange(slots, "b t n dim -> (b t) n dim")
+    #     slots = self.summarizer(slots)
+    #     summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
+    #
+    #     return summary
 
 
 class EMAJEPA(pl.LightningModule):
@@ -177,18 +177,19 @@ class EMAJEPA(pl.LightningModule):
 
         context, sample = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x, sample)
-        summary_target = self.target_model.summarize(target)
+        # summary_pred = self.context_model.summarize(pred)
+        target, _ = self.target_model.encode(x[:, 1:], context[:, 0])
+        # summary_target = self.target_model.summarize(target)
 
-        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        loss = F.mse_loss(pred[:, :-1], target)
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
-        mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
+        mean_spread = torch.var(flattened_context, dim=0).mean()
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
-        self.log("train/mean_spread", mean_spread, sync_dist=True)
+        self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
 
         if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
             return loss
@@ -228,15 +229,18 @@ class EMAJEPA(pl.LightningModule):
 
         context, sample = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x, sample)
-        summary_target = self.target_model.summarize(target)
+        # summary_pred = self.context_model.summarize(pred)
+        target, _ = self.target_model.encode(x[:, 1:], context[:, 0])
+        # summary_target = self.target_model.summarize(target)
 
-        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        loss = F.mse_loss(pred[:, :-1], target)
+
+        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
 
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
-        mean_spread = (torch.var(flattened_context, dim=0) / mean_norm).mean()
+        mean_spread = torch.var(flattened_context, dim=0).mean()
 
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
