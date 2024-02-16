@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
 )
@@ -61,20 +61,17 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-<<<<<<< HEAD
-        # self.summarizer = ContinuousTransformerWrapper(
-        #     max_seq_len=None,
-        #     attn_layers=Encoder(
-        #         dim=dim,
-        #         depth=4,
-        #         ff_glu=True,
-        #         ff_swish=True,
-        #     ),
-        #     use_abs_pos_emb=False,
-        # )
+        self.summarizer = ContinuousTransformerWrapper(
+            max_seq_len=None,
+            attn_layers=Encoder(
+                dim=dim,
+                depth=2,
+                ff_glu=True,
+                ff_swish=True,
+            ),
+            use_abs_pos_emb=False,
+        )
 
-=======
->>>>>>> parent of 1a389c2 (add summarizer)
     def encode(self, images, sample=None):
         """
         args:
@@ -91,7 +88,7 @@ class SlotJEPA(JEPA):
         features = rearrange(features, "(b t) c h w -> b t (h w) c", t=t)
         features = self.ffn(self.norm(features))
 
-        slots, init_slots = self.slot_attention.recurrent(features, init_slots=sample)
+        slots, init_slots = self.slot_attention(features, sample=sample)
 
         return slots, init_slots
 
@@ -126,23 +123,20 @@ class SlotJEPA(JEPA):
 
         return slots
 
-<<<<<<< HEAD
-    # def summarize(self, slots):
-    #     """
-    #     args:
-    #         slots: (b, t, n, dim)
-    #     returns:
-    #         context: (b, t, dim)
-    #     """
-    #     _, t, _, _ = slots.shape
-    #     slots = rearrange(slots, "b t n dim -> (b t) n dim")
-    #     slots = self.summarizer(slots)
-    #     summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
-    #
-    #     return summary
+    def summarize(self, slots):
+        """
+        args:
+            slots: (b, t, n, dim)
+        returns:
+            context: (b, t, dim)
+        """
+        _, t, _, _ = slots.shape
+        slots = rearrange(slots, "b t n dim -> (b t) n dim")
+        slots = self.summarizer(slots)
+        summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
 
-=======
->>>>>>> parent of 1a389c2 (add summarizer)
+        return summary
+
 
 class EMAJEPA(pl.LightningModule):
 
@@ -181,30 +175,30 @@ class EMAJEPA(pl.LightningModule):
 
     def training_step(self, x):
 
-        context, sample = self.context_model.encode(x)
+        context, _ = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-<<<<<<< HEAD
-        # summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x[:, 1:], context[:, 0])
-        # summary_target = self.target_model.summarize(target)
+        summary_pred = self.context_model.summarize(pred)
+        target, _ = self.target_model.encode(x)
+        summary_target = self.target_model.summarize(target)
 
-        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
-        loss = F.mse_loss(pred[:, :-1], target)
-=======
-        target, _ = self.target_model.encode(x, sample)
+        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
 
-        pred_ = rearrange(pred[:, :-1], "b t n d -> (b t n) d")
-        target_ = rearrange(target[:, 1:], "b t n d -> (b t n) d")
-
-        loss = F.mse_loss(pred_, target_)
->>>>>>> parent of 1a389c2 (add summarizer)
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = torch.var(flattened_context, dim=0).mean()
 
+        flattened_summary_target = rearrange(summary_target, "b t d -> (b t) d")
+        mean_summary_spread = torch.var(flattened_summary_target, dim=0).mean()
+
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
         self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
+        self.log(
+            "train/mean_summary_spread",
+            mean_summary_spread,
+            prog_bar=True,
+            sync_dist=True,
+        )
 
         if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
             return loss
@@ -242,22 +236,14 @@ class EMAJEPA(pl.LightningModule):
 
     def validation_step(self, x):
 
-        context, init_slots = self.context_model.encode(x)
+        context, _ = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-<<<<<<< HEAD
-        # summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x[:, 1:], context[:, 0])
-        # summary_target = self.target_model.summarize(target)
+        summary_pred = self.context_model.summarize(pred)
+        target, _ = self.target_model.encode(x)
+        summary_target = self.target_model.summarize(target)
 
-        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
-        loss = F.mse_loss(pred[:, :-1], target)
+        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
 
-        # loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
-=======
-        target, _ = self.target_model.encode(x, init_slots)
->>>>>>> parent of 1a389c2 (add summarizer)
-
-        loss = F.mse_loss(pred[:, :-1], target[:, 1:])
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = torch.var(flattened_context, dim=0).mean()
