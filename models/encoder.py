@@ -29,6 +29,14 @@ class ResNetEncoder(pl.LightningModule):
             in_dim=2, out_dim=dim, num_pos_feats=64
         )
 
+        self.norm = nn.LayerNorm(dim)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+
     def forward(self, x):
         """
         args:
@@ -42,6 +50,12 @@ class ResNetEncoder(pl.LightningModule):
 
         grid = make_grid(x.shape[-2:], device=x.device)
         grid = repeat(grid, "b h w c -> (b r) h w c", r=x.shape[0])
-        x = x + rearrange(self.pos_enc(grid), "b h w c -> b c h w")
+
+        x = rearrange(x, "b d h w -> b h w d")
+        x = self.norm(x + self.pos_enc(grid))
+
+        x = self.ffn(x)
+
+        x = rearrange(x, "b h w d -> b d h w")
 
         return x

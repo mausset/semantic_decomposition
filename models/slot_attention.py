@@ -64,11 +64,10 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, sample):
+    def forward(self, x):
         b, t, _, _ = x.shape
 
-        if sample is None:
-            sample = torch.randn((b, t, self.n_slots, self.slot_dim), device=x.device)
+        sample = torch.randn((b, t, self.n_slots, self.slot_dim), device=x.device)
         slots = self.mu + self.slots_logsigma.exp() * sample
 
         k = self.inv_cross_k(x)
@@ -86,32 +85,7 @@ class SA(pl.LightningModule):
 
         slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
 
-        return slots, sample
-
-    def recurrent(self, x, init_slots):
-        b, t, _, _ = x.shape
-
-        if init_slots is None:
-            sample = torch.randn((b, self.n_slots, self.slot_dim), device=x.device)
-            init_slots = self.mu + self.slots_logsigma.exp() * sample
-        slots = init_slots
-
-        k = self.inv_cross_k(x)
-        v = self.inv_cross_v(x)
-
-        results = []
-        for i in range(t):
-            for _ in range(self.n_iters):
-                slots = self.step(slots, k[:, i], v[:, i])
-            if self.implicit:
-                slots = self.step(slots.detach(), k[:, i], v[:, i])
-            slots = self.norm_recurrent(slots)
-            results.append(slots)
-            slots = slots.detach()
-
-        slots = torch.stack(results, dim=1)
-
-        return slots, None
+        return slots
 
 
 class ICASALayer(pl.LightningModule):

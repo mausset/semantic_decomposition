@@ -7,7 +7,7 @@ from torch.nn import ConvTranspose2d, functional as F
 
 class SpatialBroadcastDecoder(pl.LightningModule):
 
-    def __init__(self, dim, depth, init_resolution) -> None:
+    def __init__(self, dim, depth, init_resolution, features=True) -> None:
         super().__init__()
 
         self.dim = dim
@@ -34,16 +34,24 @@ class SpatialBroadcastDecoder(pl.LightningModule):
                 padding=2,
             )
         )
-        convs.append(
-            ConvTranspose2d(
-                in_channels=dim,
-                out_channels=4,
-                kernel_size=3,
-                stride=1,
-                padding=1,
+        if not features:
+            convs.append(
+                ConvTranspose2d(
+                    in_channels=dim,
+                    out_channels=4,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                )
             )
-        )
         self.convs = nn.ModuleList(convs)
+
+        if features:
+            self.ffn_alpha = nn.Sequential(
+                nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1),
+                nn.ReLU(),
+                nn.Conv2d(in_channels=dim, out_channels=1, kernel_size=1),
+            )
 
         self.pos_enc = FourierPositionalEncoding(
             in_dim=2, out_dim=dim, num_pos_feats=64
@@ -67,6 +75,17 @@ class SpatialBroadcastDecoder(pl.LightningModule):
         x = self.convs[-1](x)
 
         x = rearrange(x, "(b n) d h w -> b n d h w", n=n)
+
+        return x
+
+    def forward_features(self, x):
+        x = self.base_forward(x)
+
+        x_flat = rearrange(x, "b n d h w -> (b n) d h w")
+        alpha = self.ffn_alpha(x_flat)
+        alpha = rearrange(alpha, "(b n) 1 h w -> b n 1 h w", n=x.shape[1])
+        alpha = F.softmax(alpha, dim=1)
+        x = (x * alpha).sum(dim=1)
 
         return x
 

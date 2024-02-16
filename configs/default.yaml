@@ -6,6 +6,8 @@ model:
     dim: 64
     ema_alpha: 0.996
     learning_rate: 5e-4
+    loss_fn:
+      class_path: torch.nn.MSELoss
     base_model: 
       class_path: models.jepa.SlotJEPA
       init_args:
@@ -15,22 +17,21 @@ model:
             dim: ${.....dim}
             depth: 4
         slot_attention:
-          class_path: models.slot_attention.ICASA
+          class_path: models.slot_attention.SA
           init_args:
             input_dim: ${.....dim}
             slot_dim: ${.....dim}
-            depth: 4
             n_slots: 7
+            implicit: True
+        feature_decoder:
+          class_path: models.decoder.SpatialBroadcastDecoder
+          init_args:
+            dim: ${...dim}
+            depth: 4
+            init_resolution: [8, 8]
+            features: True
         dim: ${...dim}
         predictor_depth: 4
-    decoder:
-      class_path: models.decoder.SpatialBroadcastDecoder
-      init_args:
-        dim: ${...dim}
-        depth: 6
-        init_resolution: [8, 8]
-    decoder_detach: True
-    decoder_start_epoch: 3
 
 data:
   class_path: dataset.clevrer.CLEVRER

@@ -3,12 +3,11 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
-from einops import rearrange, repeat, reduce
+from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
 )
 from torch import nn
-from torch.nn import functional as F
 from torch.optim import AdamW
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
@@ -30,6 +29,7 @@ class SlotJEPA(JEPA):
         self,
         image_encoder: pl.LightningModule,
         slot_attention: pl.LightningModule,
+        feature_decoder: pl.LightningModule,
         dim: int,
         predictor_depth: int,
     ):
@@ -38,17 +38,12 @@ class SlotJEPA(JEPA):
 
         self.image_encoder = image_encoder
         self.slot_attention = slot_attention
+        self.feature_decoder = feature_decoder
         self.dim = dim
 
         self.slot_pos_enc = PositionalEncoding1D(dim)
 
         self.norm = nn.LayerNorm(dim)
-
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim),
-        )
 
         self.predictor = ContinuousTransformerWrapper(
             max_seq_len=None,
@@ -61,36 +56,26 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-        self.summarizer = ContinuousTransformerWrapper(
-            max_seq_len=None,
-            attn_layers=Encoder(
-                dim=dim,
-                depth=2,
-                ff_glu=True,
-                ff_swish=True,
-            ),
-            use_abs_pos_emb=False,
-        )
-
-    def encode(self, images, sample=None):
+    def encode(self, images):
         """
         args:
             images: (b, t, 3, h, w)
             slots: (b, t, n, dim)
         returns:
             slots: (b, t, n, dim)
+            features: (b, t, c, h, w)
         """
 
         _, t, _, _, _ = images.shape
 
         images = rearrange(images, "b t c h w -> (b t) c h w")
         features = self.image_encoder(images)
-        features = rearrange(features, "(b t) c h w -> b t (h w) c", t=t)
-        features = self.ffn(self.norm(features))
+        features = rearrange(features, "(b t) c h w -> b t c h w", t=t)
+        features_flat = rearrange(features, "b t c h w -> b t (h w) c", t=t)
 
-        slots, init_slots = self.slot_attention(features, sample=sample)
+        slots = self.slot_attention(features_flat)
 
-        return slots, init_slots
+        return slots, features
 
     def _create_attn_mask(self, slots):
         _, t, n, _ = slots.shape
@@ -123,20 +108,6 @@ class SlotJEPA(JEPA):
 
         return slots
 
-    def summarize(self, slots):
-        """
-        args:
-            slots: (b, t, n, dim)
-        returns:
-            context: (b, t, dim)
-        """
-        _, t, _, _ = slots.shape
-        slots = rearrange(slots, "b t n dim -> (b t) n dim")
-        slots = self.summarizer(slots)
-        summary = reduce(slots, "(b t) n d -> b t d", "mean", t=t)
-
-        return summary
-
 
 class EMAJEPA(pl.LightningModule):
 
@@ -146,9 +117,10 @@ class EMAJEPA(pl.LightningModule):
         dim,
         ema_alpha,
         learning_rate,
-        decoder=None,
-        decoder_detach=True,
-        decoder_start_epoch=0,
+        loss_fn,
+        image_decoder=None,
+        image_decoder_detach=True,
+        image_decoder_start_epoch=0,
     ):
         super().__init__()
 
@@ -159,9 +131,11 @@ class EMAJEPA(pl.LightningModule):
         self.ema_alpha = ema_alpha
         self.learning_rate = learning_rate
 
-        self.decoder = decoder
-        self.decoder_detach = decoder_detach
-        self.decoder_start_epoch = decoder_start_epoch
+        self.loss_fn = loss_fn
+
+        self.image_decoder = image_decoder
+        self.image_decoder_detach = image_decoder_detach
+        self.image_decoder_start_epoch = image_decoder_start_epoch
 
         self.last_global_step = 0  # for logging
 
@@ -177,72 +151,70 @@ class EMAJEPA(pl.LightningModule):
 
         context, _ = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x)
-        summary_target = self.target_model.summarize(target)
+        pred_flat = rearrange(pred, "b t n d -> (b t) n d")
+        pred_features = self.context_model.feature_decoder.forward_features(pred_flat)
+        pred_features = rearrange(
+            pred_features, "(b t) d h w -> b t d h w", b=x.shape[0]
+        )
+        _, target_features = self.target_model.encode(x)
 
-        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        loss = self.loss_fn(pred_features[:, :-1], target_features[:, 1:])
 
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = torch.var(flattened_context, dim=0).mean()
 
-        flattened_summary_target = rearrange(summary_target, "b t d -> (b t) d")
-        mean_summary_spread = torch.var(flattened_summary_target, dim=0).mean()
-
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
         self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
-        self.log(
-            "train/mean_summary_spread",
-            mean_summary_spread,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
-        if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
-            return loss
-
-        x = rearrange(x, "b t c h w -> (b t) c h w")
-        target = rearrange(target, "b t n d -> (b t) n d")
-
-        if self.decoder_detach:
-            target = target.detach()
-        decoded_image = self.decoder(target)
-
-        reconstruction_loss = F.mse_loss(decoded_image, x)
-        self.log(
-            "train/reconstruction_loss",
-            reconstruction_loss,
-            prog_bar=True,
-            sync_dist=True,
-        )
-        sample = torch.cat((x[0], decoded_image[0]), dim=2)
-        if (self.global_step + 1) % (
-            self.trainer.log_every_n_steps
-        ) == 0 and self.global_step != self.last_global_step:
-            self.last_global_step = self.global_step
-            self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
-
-            decoded_components = self.decoder.forward_components(target)[0]
-            component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
-            self.logger.log_image(
-                key="train/decoded_components", images=[component_img.clip(0, 1)]
-            )
-
-        loss += reconstruction_loss
 
         return loss
 
-    def validation_step(self, x):
+        # if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
+        #     return loss
+        #
+        # x = rearrange(x, "b t c h w -> (b t) c h w")
+        # target = rearrange(target, "b t n d -> (b t) n d")
+        #
+        # if self.decoder_detach:
+        #     target = target.detach()
+        # decoded_image = self.decoder(target)
+        #
+        # reconstruction_loss = F.mse_loss(decoded_image, x)
+        # self.log(
+        #     "train/reconstruction_loss",
+        #     reconstruction_loss,
+        #     prog_bar=True,
+        #     sync_dist=True,
+        # )
+        # sample = torch.cat((x[0], decoded_image[0]), dim=2)
+        # if (self.global_step + 1) % (
+        #     self.trainer.log_every_n_steps
+        # ) == 0 and self.global_step != self.last_global_step:
+        #     self.last_global_step = self.global_step
+        #     self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
+        #
+        #     decoded_components = self.decoder.forward_components(target)[0]
+        #     component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+        #     self.logger.log_image(
+        #         key="train/decoded_components", images=[component_img.clip(0, 1)]
+        #     )
+        #
+        # loss += reconstruction_loss
+        #
+        # return loss
 
+    def validation_step(self, x):
         context, _ = self.context_model.encode(x)
         pred = self.context_model.predict(context)
-        summary_pred = self.context_model.summarize(pred)
-        target, _ = self.target_model.encode(x)
-        summary_target = self.target_model.summarize(target)
+        pred_flat = rearrange(pred, "b t n d -> (b t) n d")
+        pred_features = self.context_model.feature_decoder.forward_features(pred_flat)
+        pred_features = rearrange(
+            pred_features, "(b t) d h w -> b t d h w", b=x.shape[0]
+        )
+        _, target_features = self.target_model.encode(x)
 
-        loss = F.mse_loss(summary_pred[:, :-1], summary_target[:, 1:])
+        loss = self.loss_fn(pred_features[:, :-1], target_features[:, 1:])
 
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
@@ -252,29 +224,31 @@ class EMAJEPA(pl.LightningModule):
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
 
-        if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
-            return
+        return loss
 
-        x = rearrange(x, "b t c h w -> (b t) c h w")
-        target = rearrange(target, "b t n d -> (b t) n d")
-
-        if self.decoder_detach:
-            target = target.detach()
-        decoded_image = self.decoder(target)
-
-        reconstruction_loss = F.mse_loss(decoded_image, x)
-        self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
-
-        sample = torch.cat((x[0], decoded_image[0]), dim=2)
-        self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
-
-        decoded_components = self.decoder.forward_components(target)[0]
-
-        component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
-
-        self.logger.log_image(
-            key="val/decoded_components", images=[component_img.clip(0, 1)]
-        )
+        # if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
+        #     return
+        #
+        # x = rearrange(x, "b t c h w -> (b t) c h w")
+        # target = rearrange(target, "b t n d -> (b t) n d")
+        #
+        # if self.decoder_detach:
+        #     target = target.detach()
+        # decoded_image = self.decoder(target)
+        #
+        # reconstruction_loss = F.mse_loss(decoded_image, x)
+        # self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
+        #
+        # sample = torch.cat((x[0], decoded_image[0]), dim=2)
+        # self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
+        #
+        # decoded_components = self.decoder.forward_components(target)[0]
+        #
+        # component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
+        #
+        # self.logger.log_image(
+        #     key="val/decoded_components", images=[component_img.clip(0, 1)]
+        # )
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=self.learning_rate)
