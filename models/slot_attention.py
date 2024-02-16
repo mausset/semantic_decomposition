@@ -184,8 +184,7 @@ class ICASA(pl.LightningModule):
         slots = self.mu + self.slots_logsigma.exp() * sample
         results = []
         for i in range(x.shape[1]):
-            for layer in self.layers:
-                slots = layer(x[:, i], slots)
+            slots = self.non_recurrent(x[:, i], slots)
             results.append(slots)
 
             slots = slots.detach()
