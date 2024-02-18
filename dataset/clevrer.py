@@ -1,8 +1,7 @@
 import os
-
-import lightning as pl
 import torch
 from torch.utils.data import Dataset, DataLoader
+import lightning as pl
 from torchvision.io import read_image
 from torchvision.transforms import Compose, Resize, CenterCrop, RandomHorizontalFlip
 
@@ -12,13 +11,15 @@ SECONDS = 5.12
 
 class CLEVRERDataset(Dataset):
     def __init__(
-        self, data_dir, split="train", n_frames=2 * FPS, resolution=[64, 96]
+        self, data_dir, split="train", n_frames=2 * FPS, resolution=[64, 96], stride=1
     ) -> None:
         super().__init__()
         self.data_dir = os.path.join(
             data_dir, split, "video_frames"
         )  # Updated path to match new structure
         self.n_frames = n_frames
+        self.stride = stride
+        self.strided_length = n_frames * stride
         self.video_length = int(FPS * SECONDS)
 
         self.db = self._load_db()
@@ -37,16 +38,16 @@ class CLEVRERDataset(Dataset):
 
     def _index_to_entry(self, index):
         total_frames = sum([frame_count for _, frame_count in self.db])
-        if index >= total_frames - self.n_frames:
+        if index >= total_frames - self.strided_length:
             raise ValueError("Index out of range")
 
         for video_name, frame_count in self.db:
-            if index + self.n_frames <= frame_count:
-                return video_name, index, index + self.n_frames
-            index -= frame_count - self.n_frames + 1
+            if index + self.strided_length <= frame_count:
+                return video_name, index, index + self.strided_length
+            index -= frame_count - self.strided_length + 1
 
     def __len__(self):
-        return sum(frame_count - self.n_frames + 1 for _, frame_count in self.db)
+        return sum(frame_count - self.strided_length + 1 for _, frame_count in self.db)
 
     def __getitem__(self, index):
         video_name, start, end = self._index_to_entry(index)
@@ -54,78 +55,11 @@ class CLEVRERDataset(Dataset):
 
         frames = [
             read_image(os.path.join(frames_dir, f"frame_{i}.jpg")).float() / 255.0
-            for i in range(start, end)
+            for i in range(start, end, self.stride)
         ]
         video = self.transform(torch.stack(frames))
 
         return video
-
-
-# class CLEVRERDataset(Dataset):
-#
-#     def __init__(
-#         self, data_dir, split="train", n_frames=2 * FPS, resolution=64
-#     ) -> None:
-#         super().__init__()
-#         self.data_dir = os.path.join(data_dir, split)
-#         self.n_frames = n_frames
-#         self.video_length = int(FPS * SECONDS)
-#
-#         self.db = self._load_db()
-#
-#         self.transform = tv.transforms.Compose(
-#             [
-#                 tv.transforms.Normalize((0.5,), (0.5,)),
-#                 tv.transforms.Resize(resolution),
-#             ]
-#         )
-#
-#     def _load_db(self):
-#         db = []
-#         for dir in os.listdir(os.path.join(self.data_dir)):
-#             if not dir.startswith("annotation"):
-#                 continue
-#
-#             for file in os.listdir(os.path.join(self.data_dir, dir)):
-#                 annotation_path = os.path.join(self.data_dir, dir, file)
-#                 video_path = annotation_path.replace("annotation", "video").replace(
-#                     ".json", ".mp4"
-#                 )  # noqa: E501
-#
-#                 db.append((annotation_path, video_path))
-#
-#         return db
-#
-#     def _index_to_entry(self, index):
-#         for annotation_path, video_path in self.db:
-#             if index < self.video_length - self.n_frames:
-#                 return annotation_path, video_path, index, index + self.n_frames
-#             index -= self.video_length - self.n_frames
-#
-#         raise ValueError("Index out of range")
-#
-#     def __len__(self):
-#         return len(self.db) * (self.video_length - self.n_frames)
-#
-#     def __getitem__(self, index):
-#         annotation_path, video_path, start, end = self._index_to_entry(index)
-#
-#         # TODO: load annotation
-#
-#         start_time = time.time()
-#
-#         video = (
-#             tv.io.read_video(video_path, output_format="TCHW", pts_unit="sec")[0][
-#                 start:end
-#             ].float()
-#             / 255.0
-#         )
-#
-#         print("Time to load video:", time.time() - start_time)
-#
-#         video = self.transform(video)
-#
-#         return video
 
 
 class CLEVRER(pl.LightningDataModule):
@@ -136,6 +70,7 @@ class CLEVRER(pl.LightningDataModule):
         batch_size=32,
         n_frames=2 * FPS,
         resolution=64,
+        stride=1,
         num_workers=4,
     ):
         super().__init__()
@@ -143,6 +78,7 @@ class CLEVRER(pl.LightningDataModule):
         self.batch_size = batch_size
         self.n_frames = n_frames
         self.resolution = resolution
+        self.stride = stride
         self.num_workers = num_workers
 
     def setup(self, stage=None):
@@ -151,12 +87,14 @@ class CLEVRER(pl.LightningDataModule):
             split="train",
             n_frames=self.n_frames,
             resolution=self.resolution,
+            stride=self.stride,
         )
         self.val = CLEVRERDataset(
             self.data_dir,
             split="val",
             n_frames=self.n_frames,
             resolution=self.resolution,
+            stride=self.stride,
         )
 
     def train_dataloader(self):
