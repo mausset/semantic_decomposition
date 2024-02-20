@@ -41,6 +41,7 @@ data:
     n_frames: 20
     batch_size: 1
     resolution: 128
+    stride: 5
 
 trainer:
   logger: 
