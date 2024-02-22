@@ -9,6 +9,7 @@ from positional_encodings.torch_encodings import (
 )
 from torch import nn
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
 
@@ -118,6 +119,8 @@ class EMAJEPA(pl.LightningModule):
         ema_alpha,
         learning_rate,
         loss_fn,
+        end_lr=1e-3,
+        warmup_epochs=10,
         image_decoder=None,
         image_decoder_detach=True,
         image_decoder_start_epoch=0,
@@ -132,6 +135,9 @@ class EMAJEPA(pl.LightningModule):
         self.learning_rate = learning_rate
 
         self.loss_fn = loss_fn
+
+        self.end_lr = end_lr
+        self.warmup_epochs = warmup_epochs
 
         self.image_decoder = image_decoder
         self.image_decoder_detach = image_decoder_detach
@@ -170,40 +176,6 @@ class EMAJEPA(pl.LightningModule):
 
         return loss
 
-        # if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
-        #     return loss
-        #
-        # x = rearrange(x, "b t c h w -> (b t) c h w")
-        # target = rearrange(target, "b t n d -> (b t) n d")
-        #
-        # if self.decoder_detach:
-        #     target = target.detach()
-        # decoded_image = self.decoder(target)
-        #
-        # reconstruction_loss = F.mse_loss(decoded_image, x)
-        # self.log(
-        #     "train/reconstruction_loss",
-        #     reconstruction_loss,
-        #     prog_bar=True,
-        #     sync_dist=True,
-        # )
-        # sample = torch.cat((x[0], decoded_image[0]), dim=2)
-        # if (self.global_step + 1) % (
-        #     self.trainer.log_every_n_steps
-        # ) == 0 and self.global_step != self.last_global_step:
-        #     self.last_global_step = self.global_step
-        #     self.logger.log_image(key="train/sample", images=[sample.clip(0, 1)])
-        #
-        #     decoded_components = self.decoder.forward_components(target)[0]
-        #     component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
-        #     self.logger.log_image(
-        #         key="train/decoded_components", images=[component_img.clip(0, 1)]
-        #     )
-        #
-        # loss += reconstruction_loss
-        #
-        # return loss
-
     def validation_step(self, x):
         context, _ = self.context_model.encode(x)
         pred = self.context_model.predict(context)
@@ -226,32 +198,26 @@ class EMAJEPA(pl.LightningModule):
 
         return loss
 
-        # if self.decoder is None or self.current_epoch < self.decoder_start_epoch:
-        #     return
-        #
-        # x = rearrange(x, "b t c h w -> (b t) c h w")
-        # target = rearrange(target, "b t n d -> (b t) n d")
-        #
-        # if self.decoder_detach:
-        #     target = target.detach()
-        # decoded_image = self.decoder(target)
-        #
-        # reconstruction_loss = F.mse_loss(decoded_image, x)
-        # self.log("val/reconstruction_loss", reconstruction_loss, sync_dist=True)
-        #
-        # sample = torch.cat((x[0], decoded_image[0]), dim=2)
-        # self.logger.log_image(key="val/sample", images=[sample.clip(0, 1)])
-        #
-        # decoded_components = self.decoder.forward_components(target)[0]
-        #
-        # component_img = rearrange(decoded_components, "t c h w -> c h (t w)")
-        #
-        # self.logger.log_image(
-        #     key="val/decoded_components", images=[component_img.clip(0, 1)]
-        # )
+    # def configure_optimizers(self):
+    # return AdamW(self.parameters(), lr=self.learning_rate)
 
     def configure_optimizers(self):
-        return AdamW(self.parameters(), lr=self.learning_rate)
+        optimizer = AdamW(self.parameters(), lr=self.learning_rate)
+
+        warmup_epochs = self.warmup_epochs
+        start_lr = self.learning_rate
+        end_lr = self.end_lr
+        lr_lambda = lambda epoch: (
+            ((end_lr - start_lr) / warmup_epochs) * epoch + start_lr
+            if epoch <= warmup_epochs
+            else end_lr
+        )
+
+        # Create the scheduler
+        scheduler = LambdaLR(optimizer, lr_lambda)
+
+        # Return the optimizer and scheduler
+        return [optimizer], [scheduler]
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
