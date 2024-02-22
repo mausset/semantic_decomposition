@@ -143,8 +143,6 @@ class EMAJEPA(pl.LightningModule):
         self.image_decoder_detach = image_decoder_detach
         self.image_decoder_start_epoch = image_decoder_start_epoch
 
-        self.last_global_step = 0  # for logging
-
     def _update_target(self):
         for p, p_targ in zip(
             self.context_model.parameters(), self.target_model.parameters()
