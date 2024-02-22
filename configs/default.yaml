@@ -1,21 +1,16 @@
 seed_everything: 42
 
 model:
-  class_path: models.jepa.EMAJEPA
+  class_path: models.jepa.JEPAWrapper
   init_args:
     dim: 64
-    ema_alpha: 0.996
     learning_rate: 5e-4
     loss_fn:
       class_path: torch.nn.MSELoss
     base_model: 
       class_path: models.jepa.SlotJEPA
       init_args:
-        image_encoder:
-          class_path: models.encoder.ResNetEncoder
-          init_args:
-            dim: ${.....dim}
-            depth: 4
+        image_encoder_name: 'vit_small_patch14_dinov2.lvd142m'
         slot_attention:
           class_path: models.slot_attention.SA
           init_args:
@@ -27,7 +22,7 @@ model:
           class_path: models.decoder.SpatialBroadcastDecoder
           init_args:
             dim: ${...dim}
-            depth: 4
+            depth: 3
             init_resolution: [8, 8]
             features: True
         dim: ${...dim}
@@ -38,9 +33,10 @@ data:
   init_args:
     data_dir: ./data/clevrer
     num_workers: 7
-    n_frames: 20
+    n_frames: 10
     batch_size: 1
-    resolution: 128
+    resolution: 224
+    stride: 4
 
 trainer:
   logger: 

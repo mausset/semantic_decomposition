@@ -3,7 +3,13 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import lightning as pl
 from torchvision.io import read_image
-from torchvision.transforms import Compose, Resize, CenterCrop, RandomHorizontalFlip
+from torchvision.transforms import (
+    Compose,
+    Resize,
+    CenterCrop,
+    RandomHorizontalFlip,
+    Normalize,
+)
 
 FPS = 25
 SECONDS = 5.12
@@ -25,7 +31,12 @@ class CLEVRERDataset(Dataset):
         self.db = self._load_db()
 
         self.transform = Compose(
-            [Resize(resolution), CenterCrop(resolution), RandomHorizontalFlip()]
+            [
+                Resize(resolution),
+                CenterCrop(resolution),
+                RandomHorizontalFlip(),
+                Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ]
         )
 
     def _load_db(self):
