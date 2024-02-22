@@ -198,24 +198,37 @@ class EMAJEPA(pl.LightningModule):
 
         return loss
 
-    # def configure_optimizers(self):
-    # return AdamW(self.parameters(), lr=self.learning_rate)
+    @property
+    def num_training_steps(self) -> int:
+        """Get number of training steps"""
+        self.trainer.fit_loop.setup_data()
+
+        dataset_size = len(self.trainer.train_dataloader)
+        num_steps = dataset_size // self.trainer.accumulate_grad_batches
+        return num_steps
+
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.learning_rate)
 
-        warmup_epochs = self.warmup_epochs
-        start_lr = self.learning_rate
-        end_lr = self.end_lr  # Assuming this was a typo in the original question
+        warmup_steps = self.num_training_steps * self.warmup_epochs
+        print("Warmup steps:", warmup_steps)
 
-        # Lambda function to calculate the multiplicative factor for the LR
-        lr_lambda = lambda epoch: (
-            1 + (epoch / warmup_epochs) * ((end_lr / start_lr) - 1)
-            if epoch < warmup_epochs
-            else end_lr / start_lr
-        )
+        # Increase learning rate linearly from self.learning_rate to self.end_lr
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                # Scale up from 1.0 to end_lr / learning_rate linearly
+                scale_end = self.end_lr / self.learning_rate
+                return 1.0 + (scale_end - 1.0) * (current_step / warmup_steps)
+            else:
+                # After warmup, keep the scaling constant
+                return self.end_lr / self.learning_rate
 
-        # Create the scheduler
         scheduler = LambdaLR(optimizer, lr_lambda)
+        scheduler = {
+            "scheduler": scheduler,
+            "interval": "step",
+            "frequency": 1,
+        }
 
         # Return the optimizer and scheduler
         return [optimizer], [scheduler]
