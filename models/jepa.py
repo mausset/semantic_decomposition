@@ -121,9 +121,6 @@ class EMAJEPA(pl.LightningModule):
         loss_fn,
         end_lr=1e-3,
         warmup_epochs=10,
-        image_decoder=None,
-        image_decoder_detach=True,
-        image_decoder_start_epoch=0,
     ):
         super().__init__()
 
@@ -138,10 +135,6 @@ class EMAJEPA(pl.LightningModule):
 
         self.end_lr = end_lr
         self.warmup_epochs = warmup_epochs
-
-        self.image_decoder = image_decoder
-        self.image_decoder_detach = image_decoder_detach
-        self.image_decoder_start_epoch = image_decoder_start_epoch
 
     def _update_target(self):
         for p, p_targ in zip(
