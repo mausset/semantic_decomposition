@@ -200,17 +200,18 @@ class EMAJEPA(pl.LightningModule):
 
     # def configure_optimizers(self):
     # return AdamW(self.parameters(), lr=self.learning_rate)
-
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.learning_rate)
 
         warmup_epochs = self.warmup_epochs
         start_lr = self.learning_rate
-        end_lr = self.end_lr
+        end_lr = self.end_lr  # Assuming this was a typo in the original question
+
+        # Lambda function to calculate the multiplicative factor for the LR
         lr_lambda = lambda epoch: (
-            ((end_lr - start_lr) / warmup_epochs) * epoch + start_lr
-            if epoch <= warmup_epochs
-            else end_lr
+            1 + (epoch / warmup_epochs) * ((end_lr / start_lr) - 1)
+            if epoch < warmup_epochs
+            else end_lr / start_lr
         )
 
         # Create the scheduler
