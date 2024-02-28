@@ -6,6 +6,7 @@ model:
     dim: 64
     ema_alpha: 0.996
     learning_rate: 5e-4
+    warmup_epochs: 1
     loss_fn:
       class_path: torch.nn.MSELoss
     base_model: 
@@ -44,6 +45,8 @@ data:
     stride: 5
 
 trainer:
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
   logger: 
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
