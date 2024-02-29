@@ -45,6 +45,8 @@ class SlotJEPA(JEPA):
             .requires_grad_(False)
         )
 
+        feature_dim = self.image_encoder.patch_embed.proj.out_channels
+
         self.slot_attention = slot_attention
         self.feature_decoder = feature_decoder
         self.dim = dim
@@ -64,8 +66,8 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-        self.project_down = nn.Linear(384, dim)
-        self.project_up = nn.Linear(dim, 384)
+        self.project_down = nn.Linear(feature_dim, dim)
+        self.project_up = nn.Linear(dim, feature_dim)
 
     def encode(self, images):
         """
