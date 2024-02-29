@@ -80,7 +80,7 @@ class SpatialBroadcastDecoder(pl.LightningModule):
         """
 
         x = self.base_forward(x)
-        alphas = F.softmax(x[:, :, -1:0], dim=1)
+        alphas = F.softmax(x[:, :, -1], dim=1).unsqueeze(2)
         x = x[:, :, :-1]
         x = (x * alphas).sum(dim=1)
 

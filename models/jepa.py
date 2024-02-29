@@ -81,8 +81,8 @@ class SlotJEPA(JEPA):
 
         images = rearrange(images, "b t c h w -> (b t) c h w")
         features = self.image_encoder.forward_features(images)[:, 1:]
-        features = self.project_down(features)
-        features_flat = rearrange(features, "(b t) hw c -> b t hw c", t=t)
+        features_down = self.project_down(features)
+        features_flat = rearrange(features_down, "(b t) hw c -> b t hw c", t=t)
 
         slots = self.slot_attention(features_flat)
 
@@ -224,15 +224,12 @@ class JEPAWrapper(pl.LightningModule):
         self.last_global_step = 0  # for logging
 
     def training_step(self, x):
-
         context, features = self.context_model.encode(x)
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
         pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(
-            pred_features, "(b t) d h w -> b t h w d", b=x.shape[0]
-        )
-        pred_features = self.context_model.project_up(pred_flat)
+        pred_features = rearrange(pred_features, "bt d h w -> bt (h w) d")
+        pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
 
@@ -247,16 +244,14 @@ class JEPAWrapper(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        context, _ = self.context_model.encode(x)
+        context, features = self.context_model.encode(x)
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
-        pred_features = self.context_model.feature_decoder.forward_features(pred_flat)
-        pred_features = rearrange(
-            pred_features, "(b t) d h w -> b t d h w", b=x.shape[0]
-        )
-        _, target_features = self.target_model.encode(x)
+        pred_features = self.context_model.feature_decoder(pred_flat)
+        pred_features = rearrange(pred_features, "bt d h w -> bt (h w) d")
+        pred_features = self.context_model.project_up(pred_features)
 
-        loss = self.loss_fn(pred_features[:, :-1], target_features[:, 1:])
+        loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
 
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
@@ -273,4 +268,3 @@ class JEPAWrapper(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        self._update_target()
