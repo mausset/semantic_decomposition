@@ -19,12 +19,11 @@ model:
             n_slots: 7
             implicit: True
         feature_decoder:
-          class_path: models.decoder.SpatialBroadcastDecoder
+          class_path: models.decoder.TransformerDecoder
           init_args:
             dim: ${...dim}
-            depth: 3
-            init_resolution: [8, 8]
-            features: True
+            depth: 4
+            resolution: [16, 16]
         dim: ${...dim}
         predictor_depth: 4
 

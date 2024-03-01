@@ -230,7 +230,7 @@ class JEPAWrapper(pl.LightningModule):
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
         pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(pred_features, "bt d h w -> bt (h w) d")
+        pred_features = rearrange(pred_features, "bt h w d -> bt (h w) d")
         pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
@@ -250,7 +250,7 @@ class JEPAWrapper(pl.LightningModule):
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
         pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(pred_features, "bt d h w -> bt (h w) d")
+        pred_features = rearrange(pred_features, "bt h w d -> bt (h w) d")
         pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])

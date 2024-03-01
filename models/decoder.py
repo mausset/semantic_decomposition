@@ -3,6 +3,49 @@ from einops import rearrange, repeat
 from utils.soft_pos_enc import FourierPositionalEncoding, make_grid
 from torch import nn
 from torch.nn import ConvTranspose2d, functional as F
+from x_transformers import Encoder, ContinuousTransformerWrapper
+
+
+class TransformerDecoder(pl.LightningModule):
+
+    def __init__(self, dim, depth, resolution) -> None:
+        super().__init__()
+
+        self.dim = dim
+        self.depth = depth
+        self.resolution = resolution
+
+        self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
+
+        self.transformer = ContinuousTransformerWrapper(
+            max_seq_len=None,
+            attn_layers=Encoder(
+                dim=dim,
+                depth=depth,
+                cross_attend=True,
+                ff_glu=True,
+                ff_swish=True,
+            ),
+            use_abs_pos_emb=False,
+        )
+
+    def forward(self, x):
+        """
+        args:
+            x: (B, N, D), extracted object representations
+        returns:
+            (B, H, W), predicted masks
+        """
+
+        grid = make_grid(self.resolution, device=x.device)
+        grid = repeat(grid, "b h w d -> (b r) (h w) d", r=x.shape[0])
+        scaffold = self.pos_enc(grid)
+        result = self.transformer(scaffold, context=x)
+        result = rearrange(
+            result, "b (h w) d -> b h w d", h=self.resolution[0], w=self.resolution[1]
+        )
+
+        return result
 
 
 class SpatialBroadcastDecoder(pl.LightningModule):
@@ -67,7 +110,7 @@ class SpatialBroadcastDecoder(pl.LightningModule):
             x = F.relu(conv(x))
         x = self.convs[-1](x)
 
-        x = rearrange(x, "(b n) d h w -> b n d h w", n=n)
+        x = rearrange(x, "(b n) d h w -> b n h w d", n=n)
 
         return x
 
@@ -83,19 +126,5 @@ class SpatialBroadcastDecoder(pl.LightningModule):
         alphas = F.softmax(x[:, :, -1], dim=1).unsqueeze(2)
         x = x[:, :, :-1]
         x = (x * alphas).sum(dim=1)
-
-        return x
-
-    def forward_components(self, x):
-        """
-        args:
-            x: (B, N, D), extracted object representations
-        returns:
-            (B, N, 4, H, W), components
-        """
-
-        x = self.base_forward(x)
-        alphas = F.softmax(x[:, :, 3:4], dim=1)
-        x[:, :, 3:4] = alphas
 
         return x

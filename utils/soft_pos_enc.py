@@ -21,21 +21,21 @@ def make_grid(resolution, device=None):
 class FourierPositionalEncoding(nn.Module):
     "Positional encoding learned in the Fourier basis."
 
-    def __init__(self, in_dim: int = 2, out_dim: int = 256, num_pos_feats: int = 64):
+    def __init__(self, in_dim: int = 2, out_dim: int = 256):
         super().__init__()
         scale = 1.0
 
-        self.num_pos_feats = num_pos_feats
+        self.num_pos_feats = out_dim // 2
         self.out_dim = out_dim
 
         self.positional_encoding_gaussian = nn.Parameter(
-            scale * torch.randn((in_dim, num_pos_feats))
+            scale * torch.randn((in_dim, self.num_pos_feats))
         )
 
         self.ffn = nn.Sequential(
-            nn.Linear(2 * num_pos_feats, num_pos_feats),
+            nn.Linear(2 * self.num_pos_feats, self.num_pos_feats),
             nn.GELU(),
-            nn.Linear(num_pos_feats, out_dim),
+            nn.Linear(self.num_pos_feats, out_dim),
         )
 
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
