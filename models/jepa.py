@@ -88,6 +88,8 @@ class SlotJEPA(JEPA):
 
         slots = self.slot_attention(features_flat)
 
+        features = rearrange(features, "(b t) n d -> b t n d", t=t)
+
         return slots, features
 
     def _create_attn_mask(self, slots):
@@ -230,7 +232,9 @@ class JEPAWrapper(pl.LightningModule):
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
         pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(pred_features, "bt h w d -> bt (h w) d")
+        pred_features = rearrange(
+            pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
+        )
         pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
@@ -250,7 +254,9 @@ class JEPAWrapper(pl.LightningModule):
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
         pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(pred_features, "bt h w d -> bt (h w) d")
+        pred_features = rearrange(
+            pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
+        )
         pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
