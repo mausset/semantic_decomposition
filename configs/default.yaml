@@ -3,7 +3,7 @@ seed_everything: 42
 model:
   class_path: models.jepa.JEPAWrapper
   init_args:
-    dim: 64
+    dim: 384
     learning_rate: 5e-4
     loss_fn:
       class_path: torch.nn.MSELoss

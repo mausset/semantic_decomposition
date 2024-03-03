@@ -45,8 +45,6 @@ class SlotJEPA(JEPA):
             .requires_grad_(False)
         )
 
-        feature_dim = self.image_encoder.patch_embed.proj.out_channels
-
         self.slot_attention = slot_attention
         self.feature_decoder = feature_decoder
         self.dim = dim
@@ -66,9 +64,6 @@ class SlotJEPA(JEPA):
             use_abs_pos_emb=False,
         )
 
-        self.project_down = nn.Linear(feature_dim, dim)
-        self.project_up = nn.Linear(dim, feature_dim)
-
     def encode(self, images):
         """
         args:
@@ -83,12 +78,9 @@ class SlotJEPA(JEPA):
 
         images = rearrange(images, "b t c h w -> (b t) c h w")
         features = self.image_encoder.forward_features(images)[:, 1:]
-        features_down = self.project_down(features)
-        features_flat = rearrange(features_down, "(b t) hw c -> b t hw c", t=t)
+        features = rearrange(features, "(b t) hw d -> b t hw d", t=t)
 
-        slots = self.slot_attention(features_flat)
-
-        features = rearrange(features, "(b t) n d -> b t n d", t=t)
+        slots = self.slot_attention(features)
 
         return slots, features
 
@@ -227,21 +219,31 @@ class JEPAWrapper(pl.LightningModule):
 
         self.last_global_step = 0  # for logging
 
-    def training_step(self, x):
+    def common_step(self, x):
+
         context, features = self.context_model.encode(x)
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
-        pred_features = self.context_model.feature_decoder(pred_flat)
+        mask = (torch.randn(pred_flat.shape[:-1], device=x.device) > 0.5).bool()
+        mask = torch.cat((mask, ~mask))
+        pred_flat = torch.cat((pred_flat, pred_flat))
+        pred_features = self.context_model.feature_decoder(pred_flat, context_mask=mask)
+        chunk1, chunk2 = pred_features.chunk(2, dim=0)
+        pred_features = chunk1 + chunk2
         pred_features = rearrange(
             pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
         )
-        pred_features = self.context_model.project_up(pred_features)
 
         loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
 
         flattened_context = rearrange(context, "b t n d -> (b t n) d")
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = torch.var(flattened_context, dim=0).mean()
+
+        return loss, mean_norm, mean_spread
+
+    def training_step(self, x):
+        loss, mean_norm, mean_spread = self.common_step(x)
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
@@ -250,20 +252,7 @@ class JEPAWrapper(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        context, features = self.context_model.encode(x)
-        pred = self.context_model.predict(context)
-        pred_flat = rearrange(pred, "b t n d -> (b t) n d")
-        pred_features = self.context_model.feature_decoder(pred_flat)
-        pred_features = rearrange(
-            pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
-        )
-        pred_features = self.context_model.project_up(pred_features)
-
-        loss = self.loss_fn(pred_features[:, :-1], features[:, 1:])
-
-        flattened_context = rearrange(context, "b t n d -> (b t n) d")
-        mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
-        mean_spread = torch.var(flattened_context, dim=0).mean()
+        loss, mean_norm, mean_spread = self.common_step(x)
 
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)

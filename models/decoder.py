@@ -29,7 +29,7 @@ class TransformerDecoder(pl.LightningModule):
             use_abs_pos_emb=False,
         )
 
-    def forward(self, x):
+    def forward(self, x, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -40,7 +40,7 @@ class TransformerDecoder(pl.LightningModule):
         grid = make_grid(self.resolution, device=x.device)
         grid = repeat(grid, "b h w d -> (b r) (h w) d", r=x.shape[0])
         scaffold = self.pos_enc(grid)
-        result = self.transformer(scaffold, context=x)
+        result = self.transformer(scaffold, context=x, context_mask=context_mask)
         result = rearrange(
             result, "b (h w) d -> b h w d", h=self.resolution[0], w=self.resolution[1]
         )
