@@ -256,8 +256,9 @@ class JEPAWrapper(pl.LightningModule):
         alpha_img = repeat(
             alpha[0], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
         )
-
-        img = torch.cat([x[0, 0], alpha_img], dim=2)
+        sampled_img = repeat(x[0, 1], "c h w -> c h (n w)", n=alpha.shape[-2])
+        masked = sampled_img * alpha_img
+        img = torch.cat([x[0, 1], masked], dim=2)
         self.logger.log_image(key="alphas", images=[img])
 
         return loss
