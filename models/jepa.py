@@ -253,13 +253,19 @@ class JEPAWrapper(pl.LightningModule):
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
 
+        time_step = torch.randint(1, x.shape[1] - 1, (1,)).item()
+
         alpha_img = repeat(
-            alpha[0], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
+            alpha[time_step], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
         )
-        sampled_img = repeat(x[0, 1], "c h w -> c h (n w)", n=alpha.shape[-2])
+        sampled_img = repeat(
+            x[0, time_step + 1], "c h w -> c h (n w)", n=alpha.shape[-2]
+        )
         masked = sampled_img * alpha_img
-        img = torch.cat([x[0, 1], masked], dim=2)
-        self.logger.log_image(key="alphas", images=[img])
+        img = torch.cat([sampled_img, masked], dim=2)
+        self.logger.log_image(
+            key="alphas", images=[img], caption=[f"Time step: {time_step}"]
+        )
 
         return loss
 
