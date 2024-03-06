@@ -28,6 +28,8 @@ class TransformerDecoder(pl.LightningModule):
             use_abs_pos_emb=False,
         )
 
+        self.alpha_projection = nn.Linear(dim, 1)
+
     def forward(self, x):
         """
         args:
@@ -45,10 +47,11 @@ class TransformerDecoder(pl.LightningModule):
         x = rearrange(x, "b h w n d -> (b h w) n d")
 
         result = self.transformer(x)
-        result = reduce(
+        alpha = self.alpha_projection(result)
+        result = (result * F.softmax(alpha, dim=1)).sum(dim=1)
+        result = rearrange(
             result,
-            "(b h w) n d -> b h w d",
-            "sum",
+            "(b h w) d -> b h w d",
             h=self.resolution[0],
             w=self.resolution[1],
         )
