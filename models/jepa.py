@@ -238,11 +238,20 @@ class JEPAWrapper(pl.LightningModule):
         return loss, alpha, mean_norm, mean_spread
 
     def training_step(self, x):
-        loss, alpha, mean_norm, mean_spread = self.common_step(x)
+        loss, _, mean_norm, mean_spread = self.common_step(x)
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
         self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
+
+        return loss
+
+    def validation_step(self, x):
+        loss, alpha, mean_norm, mean_spread = self.common_step(x)
+
+        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
+        self.log("val/mean_norm", mean_norm, sync_dist=True)
+        self.log("val/mean_spread", mean_spread, sync_dist=True)
 
         time_step = torch.randint(1, x.shape[1] - 1, (1,)).item()
 
@@ -258,15 +267,6 @@ class JEPAWrapper(pl.LightningModule):
         self.logger.log_image(
             key="alphas", images=[img], caption=[f"Time step: {time_step}"]
         )
-
-        return loss
-
-    def validation_step(self, x):
-        loss, alpha, mean_norm, mean_spread = self.common_step(x)
-
-        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
-        self.log("val/mean_norm", mean_norm, sync_dist=True)
-        self.log("val/mean_spread", mean_spread, sync_dist=True)
 
         return loss
 
