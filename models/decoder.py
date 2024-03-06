@@ -1,5 +1,5 @@
 import lightning as pl
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 from utils.soft_pos_enc import FourierPositionalEncoding, make_grid
 from torch import nn
 from torch.nn import ConvTranspose2d, functional as F
@@ -22,14 +22,13 @@ class TransformerDecoder(pl.LightningModule):
             attn_layers=Encoder(
                 dim=dim,
                 depth=depth,
-                cross_attend=True,
                 ff_glu=True,
                 ff_swish=True,
             ),
             use_abs_pos_emb=False,
         )
 
-    def forward(self, x, context_mask=None):
+    def forward(self, x):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -38,11 +37,20 @@ class TransformerDecoder(pl.LightningModule):
         """
 
         grid = make_grid(self.resolution, device=x.device)
-        grid = repeat(grid, "b h w d -> (b r) (h w) d", r=x.shape[0])
+        grid = repeat(grid, "b h w d -> (b r) h w n d", r=x.shape[0], n=x.shape[1])
+
         scaffold = self.pos_enc(grid)
-        result = self.transformer(scaffold, context=x, context_mask=context_mask)
-        result = rearrange(
-            result, "b (h w) d -> b h w d", h=self.resolution[0], w=self.resolution[1]
+        x = repeat(x, "b n d -> b h w n d", h=self.resolution[0], w=self.resolution[1])
+        x = x + scaffold
+        x = rearrange(x, "b h w n d -> (b h w) n d")
+
+        result = self.transformer(x)
+        result = reduce(
+            result,
+            "(b h w) n d -> b h w d",
+            "mean",
+            h=self.resolution[0],
+            w=self.resolution[1],
         )
 
         return result

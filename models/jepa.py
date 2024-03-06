@@ -224,12 +224,7 @@ class JEPAWrapper(pl.LightningModule):
         context, features = self.context_model.encode(x)
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
-        mask = (torch.randn(pred_flat.shape[:-1], device=x.device) > 0.5).bool()
-        mask = torch.cat((mask, ~mask))
-        pred_flat = torch.cat((pred_flat, pred_flat))
-        pred_features = self.context_model.feature_decoder(pred_flat, context_mask=mask)
-        chunk1, chunk2 = pred_features.chunk(2, dim=0)
-        pred_features = chunk1 + chunk2
+        pred_features = self.context_model.feature_decoder(pred_flat)
         pred_features = rearrange(
             pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
         )
