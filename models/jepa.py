@@ -258,7 +258,7 @@ class JEPAWrapper(pl.LightningModule):
         )
 
         img = torch.cat([x[0, 0], alpha_img], dim=2)
-        self.logger.experiment.log({"val/alpha": img})
+        self.logger.log_image(key="alphas", images=[img])
 
         return loss
 
