@@ -254,7 +254,7 @@ class JEPAWrapper(pl.LightningModule):
         self.log("val/mean_spread", mean_spread, sync_dist=True)
 
         alpha_img = repeat(
-            alpha[0], "h w n c -> (c cr) (h hr) (w wr n)", hr=14, wr=14, cr=3
+            alpha[0], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
         )
 
         img = torch.cat([x[0, 0], alpha_img], dim=2)
