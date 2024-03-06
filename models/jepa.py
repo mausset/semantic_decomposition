@@ -238,11 +238,26 @@ class JEPAWrapper(pl.LightningModule):
         return loss, alpha, mean_norm, mean_spread
 
     def training_step(self, x):
-        loss, _, mean_norm, mean_spread = self.common_step(x)
+        loss, alpha, mean_norm, mean_spread = self.common_step(x)
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
         self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
+
+        time_step = torch.randint(1, x.shape[1] - 1, (1,)).item()
+
+        alpha_img = repeat(
+            alpha[time_step], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
+        )
+        sampled_img = x[0, time_step + 1]
+        sampled_img_repeat = repeat(
+            sampled_img, "c h w -> c h (n w)", n=alpha.shape[-2]
+        )
+        masked = sampled_img_repeat * alpha_img
+        img = torch.cat([sampled_img, masked], dim=2)
+        self.logger.log_image(
+            key="alphas", images=[img], caption=[f"Time step: {time_step}"]
+        )
 
         return loss
 
@@ -252,20 +267,6 @@ class JEPAWrapper(pl.LightningModule):
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
-
-        time_step = torch.randint(1, x.shape[1] - 1, (1,)).item()
-
-        alpha_img = repeat(
-            alpha[time_step], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
-        )
-        sampled_img = repeat(
-            x[0, time_step + 1], "c h w -> c h (n w)", n=alpha.shape[-2]
-        )
-        masked = sampled_img * alpha_img
-        img = torch.cat([sampled_img, masked], dim=2)
-        self.logger.log_image(
-            key="alphas", images=[img], caption=[f"Time step: {time_step}"]
-        )
 
         return loss
 
