@@ -224,7 +224,7 @@ class JEPAWrapper(pl.LightningModule):
         context, features = self.context_model.encode(x)
         pred = self.context_model.predict(context)
         pred_flat = rearrange(pred, "b t n d -> (b t) n d")
-        pred_features = self.context_model.feature_decoder(pred_flat)
+        pred_features, alpha = self.context_model.feature_decoder(pred_flat)
         pred_features = rearrange(
             pred_features, "(b t) h w d -> b t (h w) d", b=x.shape[0]
         )
@@ -235,10 +235,10 @@ class JEPAWrapper(pl.LightningModule):
         mean_norm = torch.mean(torch.norm(flattened_context, dim=-1))
         mean_spread = torch.var(flattened_context, dim=0).mean()
 
-        return loss, mean_norm, mean_spread
+        return loss, alpha, mean_norm, mean_spread
 
     def training_step(self, x):
-        loss, mean_norm, mean_spread = self.common_step(x)
+        loss, _, mean_norm, mean_spread = self.common_step(x)
 
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         self.log("train/mean_norm", mean_norm, sync_dist=True)
@@ -247,11 +247,18 @@ class JEPAWrapper(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        loss, mean_norm, mean_spread = self.common_step(x)
+        loss, alpha, mean_norm, mean_spread = self.common_step(x)
 
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
+
+        alpha_img = repeat(
+            alpha[0], "h w n c -> (c cr) (h hr) (w wr n)", hr=14, wr=14, cr=3
+        )
+
+        img = torch.cat([x[0, 0], alpha_img], dim=2)
+        self.logger.experiment.log({"val/alpha": img})
 
         return loss
 

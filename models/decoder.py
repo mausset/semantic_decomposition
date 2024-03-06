@@ -1,5 +1,5 @@
 import lightning as pl
-from einops import rearrange, repeat, reduce
+from einops import rearrange, repeat
 from utils.soft_pos_enc import FourierPositionalEncoding, make_grid
 from torch import nn
 from torch.nn import ConvTranspose2d, functional as F
@@ -20,7 +20,7 @@ class MLPDecoder(pl.LightningModule):
         mlp = []
         for i in range(depth - 1):
             mlp.append(
-                nn.Linear(dim * expansion_factor if i else 1, dim * expansion_factor)
+                nn.Linear(dim * (expansion_factor if i else 1), dim * expansion_factor)
             )
             mlp.append(nn.ReLU())
         mlp.append(nn.Linear(dim * expansion_factor, dim))
@@ -45,15 +45,10 @@ class MLPDecoder(pl.LightningModule):
 
         result = self.mlp(x)
         alpha = self.alpha_projection(result)
-        result = (result * F.softmax(alpha, dim=1)).sum(dim=1)
-        result = rearrange(
-            result,
-            "(b h w) d -> b h w d",
-            h=self.resolution[0],
-            w=self.resolution[1],
-        )
+        alpha = F.softmax(alpha, dim=3)
+        result = (result * alpha).sum(dim=3)
 
-        return result
+        return result, alpha
 
 
 class TransformerDecoder(pl.LightningModule):
