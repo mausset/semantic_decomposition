@@ -48,7 +48,7 @@ class TransformerDecoder(pl.LightningModule):
         result = reduce(
             result,
             "(b h w) n d -> b h w d",
-            "mean",
+            "sum",
             h=self.resolution[0],
             w=self.resolution[1],
         )
