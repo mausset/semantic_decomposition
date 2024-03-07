@@ -249,9 +249,6 @@ class JEPAWrapper(pl.LightningModule):
     def validation_step(self, x):
         loss, alpha, mean_norm, mean_spread = self.common_step(x)
 
-        print(x.shape)
-        print(alpha.shape)
-
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
