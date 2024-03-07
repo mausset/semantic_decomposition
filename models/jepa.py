@@ -249,6 +249,9 @@ class JEPAWrapper(pl.LightningModule):
     def validation_step(self, x):
         loss, alpha, mean_norm, mean_spread = self.common_step(x)
 
+        print(x.shape)
+        print(alpha.shape)
+
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
@@ -256,12 +259,10 @@ class JEPAWrapper(pl.LightningModule):
         time_step = torch.randint(1, x.shape[1] - 1, (1,)).item()
 
         alpha_img = repeat(
-            alpha[time_step], "h w n c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
+            alpha[time_step], "n h w c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
         )
         sampled_img = x[0, time_step + 1]
-        sampled_img_repeat = repeat(
-            sampled_img, "c h w -> c h (n w)", n=alpha.shape[-2]
-        )
+        sampled_img_repeat = repeat(sampled_img, "c h w -> c h (n w)", n=alpha.shape[1])
         masked = sampled_img_repeat * alpha_img
         img = torch.cat([sampled_img, masked], dim=2)
         self.logger.log_image(
