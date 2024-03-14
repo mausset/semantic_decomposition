@@ -4,6 +4,7 @@ from copy import deepcopy
 import lightning as pl
 import timm
 import torch
+from torchvision.transforms import Normalize
 from einops import rearrange, repeat
 from positional_encodings.torch_encodings import (
     PositionalEncoding1D,
@@ -217,7 +218,9 @@ class JEPAWrapper(pl.LightningModule):
 
         self.loss_fn = loss_fn
 
-        self.last_global_step = 0  # for logging
+        mean = torch.tensor([0.485, 0.456, 0.406], device=self.device)
+        std = torch.tensor([0.229, 0.224, 0.225], device=self.device)
+        self.denormalize = Normalize((-mean / std).tolist(), (1.0 / std).tolist())
 
     def common_step(self, x):
 
@@ -258,7 +261,8 @@ class JEPAWrapper(pl.LightningModule):
         alpha_img = repeat(
             alpha[time_step], "n h w c -> (c cr) (h hr) (n w wr)", hr=14, wr=14, cr=3
         )
-        sampled_img = x[0, time_step + 1]
+        sampled_img = self.denormalize(x[0, time_step + 1])
+
         sampled_img_repeat = repeat(sampled_img, "c h w -> c h (n w)", n=alpha.shape[1])
         masked = sampled_img_repeat * alpha_img
         img = torch.cat([sampled_img, masked], dim=2)
