@@ -92,7 +92,14 @@ class SAT(pl.LightningModule):
     "Transformer layer with inverted cross attention."
 
     def __init__(
-        self, input_dim, slot_dim, n_slots=8, n_iters=3, implicit=False, eps=1e-8
+        self,
+        input_dim,
+        slot_dim,
+        n_slots=8,
+        n_iters=3,
+        implicit=False,
+        self_attn=True,
+        eps=1e-8,
     ):
         super().__init__()
         self.in_dim = input_dim
@@ -100,6 +107,7 @@ class SAT(pl.LightningModule):
         self.n_slots = n_slots
         self.n_iters = n_iters
         self.implicit = implicit
+        self.self_attn = self_attn
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -122,6 +130,7 @@ class SAT(pl.LightningModule):
         )
 
     def step(self, slots, k, v):
+        _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
@@ -133,7 +142,11 @@ class SAT(pl.LightningModule):
 
         slots = self.norm_post_ica(slots + updates)
 
-        slots = self.encoder_transformer(slots)
+        attn_mask = None
+        if not self.self_attn:
+            attn_mask = ~(torch.eye(n, device=self.device).bool())
+
+        slots = self.encoder_transformer(slots, attn_mask=attn_mask)
 
         return slots
 
