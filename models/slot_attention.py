@@ -33,9 +33,9 @@ class SA(pl.LightningModule):
         self.gru = nn.GRUCell(slot_dim, slot_dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(slot_dim, slot_dim * 2),
+            nn.Linear(slot_dim, slot_dim * 4),
             nn.ReLU(inplace=True),
-            nn.Linear(slot_dim * 2, input_dim),
+            nn.Linear(slot_dim * 4, input_dim),
         )
 
         self.norm_input = nn.LayerNorm(slot_dim)
