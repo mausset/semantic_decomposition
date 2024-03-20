@@ -33,7 +33,7 @@ class ConceptBank(nn.Module):
     def forward(self, x, n_slots=8):
 
         cosine_sim = F.cosine_similarity(
-            x.unsqueeze(2), self.mu_concepts.unsqueeze(0).unsqueeze(0), dim=-1
+            x.unsqueeze(2), self.mu.unsqueeze(0).unsqueeze(0), dim=-1
         )
 
         cosine_sim_soft = F.softmax(cosine_sim, dim=-1)
@@ -42,9 +42,9 @@ class ConceptBank(nn.Module):
 
         _, idx = torch.topk(r, n_slots, dim=-1)
 
-        mu_sample = self.mu_concepts[idx]
-        sigma_sample = torch.exp(self.log_sigma_concepts[idx])
+        mu_sample = self.mu[idx]
+        sigma_sample = torch.exp(self.log_sigma[idx])
 
-        sample = mu_sample + sigma_sample * torch.randn_like(mu_sample)
+        sample = mu_sample + sigma_sample * torch.randn_like(mu_sample, device=x.device)
 
         return sample

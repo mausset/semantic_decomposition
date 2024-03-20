@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from einops import rearrange
 
-from x_transformers import Encoder
+from .utils import SwiGLUFFN, ConceptBank
 
 
 class SA(pl.LightningModule):
@@ -21,10 +21,7 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.mu = nn.Parameter(torch.randn(slot_dim))
-        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, slot_dim))
-        nn.init.xavier_uniform_(self.slots_logsigma)
-        self.slots_logsigma = nn.Parameter(self.slots_logsigma.squeeze())
+        self.concept_bank = ConceptBank(slot_dim)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -63,32 +60,31 @@ class SA(pl.LightningModule):
         return slots
 
     def forward(self, x):
-        b, t, _, _ = x.shape
+        _, t, _, _ = x.shape
+
+        x = rearrange(x, "b t n d -> (b t) n d")
 
         x = self.norm_input(x)
 
-        sample = torch.randn((b, t, self.n_slots, self.slot_dim), device=x.device)
-        slots = self.mu + self.slots_logsigma.exp() * sample
+        init_slots = self.concept_bank(x)
+        slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
-
-        k = rearrange(k, "b t n d -> (b t) n d")
-        v = rearrange(v, "b t n d -> (b t) n d")
-        slots = rearrange(slots, "b t n d -> (b t) n d")
 
         for _ in range(self.n_iters):
             slots = self.step(slots, k, v)
 
         if self.implicit:
-            slots = self.step(slots.detach(), k, v)
+            slots = slots.detach() - init_slots.detach() + init_slots
+            slots = self.step(slots, k, v)
 
         slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
 
         return slots
 
 
-class SAT(pl.LightningModule):
+class SAV2(pl.LightningModule):
     "Transformer layer with inverted cross attention."
 
     def __init__(
@@ -97,8 +93,7 @@ class SAT(pl.LightningModule):
         slot_dim,
         n_slots=8,
         n_iters=3,
-        implicit=False,
-        self_attn=True,
+        implicit=True,
         eps=1e-8,
     ):
         super().__init__()
@@ -107,15 +102,11 @@ class SAT(pl.LightningModule):
         self.n_slots = n_slots
         self.n_iters = n_iters
         self.implicit = implicit
-        self.self_attn = self_attn
         self.eps = eps
 
         self.scale = input_dim**-0.5
 
-        self.mu = nn.Parameter(torch.randn(slot_dim))
-        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, slot_dim))
-        nn.init.xavier_uniform_(self.slots_logsigma)
-        self.slots_logsigma = nn.Parameter(self.slots_logsigma.squeeze())
+        self.concept_bank = ConceptBank(slot_dim)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -123,53 +114,45 @@ class SAT(pl.LightningModule):
 
         self.norm_input = nn.LayerNorm(slot_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
-        self.norm_post_ica = nn.LayerNorm(slot_dim)
+        self.norm_ica = nn.LayerNorm(slot_dim)
+        self.norm_ffn = nn.LayerNorm(slot_dim)
 
-        self.encoder_transformer = Encoder(
-            dim=slot_dim, depth=1, ff_glu=True, ff_swish=True
-        )
+        self.ffn = SwiGLUFFN(slot_dim)
 
     def step(self, slots, k, v):
-        _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
         attn = dots.softmax(dim=1) + self.eps
         attn = attn / attn.sum(dim=-1, keepdim=True)
-
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
-        slots = self.norm_post_ica(slots + updates)
+        slots = self.norm_ica(slots + updates)
 
-        attn_mask = None
-        if not self.self_attn:
-            attn_mask = ~(torch.eye(n, device=self.device).bool())
-
-        slots = self.encoder_transformer(slots, attn_mask=attn_mask)
+        slots = self.norm_ffn(self.ffn(slots) + slots)
 
         return slots
 
     def forward(self, x):
-        b, t, _, _ = x.shape
+        _, t, _, _ = x.shape
+
+        x = rearrange(x, "b t n d -> (b t) n d")
 
         x = self.norm_input(x)
 
-        sample = torch.randn((b, t, self.n_slots, self.slot_dim), device=x.device)
-        slots = self.mu + self.slots_logsigma.exp() * sample
+        init_slots = self.concept_bank(x)
+        slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
-
-        k = rearrange(k, "b t n d -> (b t) n d")
-        v = rearrange(v, "b t n d -> (b t) n d")
-        slots = rearrange(slots, "b t n d -> (b t) n d")
 
         for _ in range(self.n_iters):
             slots = self.step(slots, k, v)
 
         if self.implicit:
-            slots = self.step(slots.detach(), k, v)
+            slots = slots.detach() - init_slots.detach() + init_slots
+            slots = self.step(slots, k, v)
 
         slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
 
