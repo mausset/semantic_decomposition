@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.linalg import eigh
 from torch.nn import functional as F
 
 
@@ -32,15 +33,20 @@ class ConceptBank(nn.Module):
 
     def forward(self, x, n_slots=8):
 
+        cov = torch.einsum("bnd,bmd->bnm", x, x)
+
+        eig_values, eig_vectors = eigh(cov)
+
+        eig_values = eig_values[:, -n_slots:]
+        eig_vectors = eig_vectors[:, :, -n_slots:]
+
+        projection = torch.matmul(eig_vectors.mT, x)
+
         cosine_sim = F.cosine_similarity(
-            x.unsqueeze(2), self.mu.unsqueeze(0).unsqueeze(0), dim=-1
+            projection.unsqueeze(2), self.mu.unsqueeze(0).unsqueeze(0), dim=-1
         )
 
-        cosine_sim_soft = F.softmax(cosine_sim, dim=-1)
-
-        r = F.softmax(cosine_sim_soft.sum(dim=1), dim=-1)
-
-        _, idx = torch.topk(r, n_slots, dim=-1)
+        idx = torch.argmax(cosine_sim, dim=-1)
 
         mu_sample = self.mu[idx]
         sigma_sample = torch.exp(self.log_sigma[idx])

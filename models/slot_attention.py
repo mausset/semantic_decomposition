@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from einops import rearrange
 
-from .utils import SwiGLUFFN, ConceptBank
+from .components import SwiGLUFFN, ConceptBank
 
 
 class SA(pl.LightningModule):
