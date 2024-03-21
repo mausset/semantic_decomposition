@@ -46,9 +46,6 @@ class CLEVRERDataset(Dataset):
         return db
 
     def _index_to_entry(self, index):
-        total_frames = sum([frame_count for _, frame_count in self.db])
-        if index >= total_frames - self.strided_length:
-            raise ValueError("Index out of range")
 
         for video_name, frame_count in self.db:
             if index + self.strided_length <= frame_count:
