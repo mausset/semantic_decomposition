@@ -14,7 +14,6 @@ def make_grid(resolution, device=None):
         ),
         dim=-1,
     )
-    grid = torch.unsqueeze(grid, 0)
     return grid
 
 

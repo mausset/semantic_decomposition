@@ -1,10 +1,9 @@
 import lightning as pl
-import torch
-from einops import rearrange, repeat
+from einops import repeat
 from torch import nn
 from torch.nn import functional as F
-from utils.soft_pos_enc import FourierPositionalEncoding, make_grid
-from x_transformers import ContinuousTransformerWrapper, Encoder
+from utils.pos_enc import FourierPositionalEncoding, make_grid
+from x_transformers import Encoder
 
 
 class MLPDecoder(pl.LightningModule):
@@ -63,49 +62,32 @@ class TransformerDecoder(pl.LightningModule):
 
         self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
 
-        self.transformer = ContinuousTransformerWrapper(
-            max_seq_len=None,
-            attn_layers=Encoder(
-                dim=dim,
-                depth=depth,
-                cross_attend=True,
-                ff_glu=True,
-                ff_swish=True,
-            ),
-            use_abs_pos_emb=False,
+        self.transformer = Encoder(
+            dim=dim,
+            depth=depth,
+            cross_attend=True,
+            ff_glu=True,
+            ff_swish=True,
         )
 
-        self.alpha_projection = nn.Linear(dim, 1)
-
-    def forward(self, x, split=2):
+    def forward(self, x):
         """
         args:
             x: (B, N, D), extracted object representations
         returns:
-            (B, H, W), predicted masks
+            (B, HW, D), decoded features
+            (B, HW, N), cross-attention map
         """
-        b, n, _ = x.shape
-
-        x = repeat(x, "b n d -> (r b) n d", r=split)
-
-        mask = torch.rand((b, n), device=x.device) > 0.5
-        mask = torch.cat([mask, ~mask], dim=0)
+        b, _, _ = x.shape
 
         grid = make_grid(self.resolution, device=x.device)
-        grid = repeat(grid, "b h w d -> (b r) (h w) d", r=b * split)
+        grid = repeat(grid, "h w d -> b (h w) d", b=b)
 
         scaffold = self.pos_enc(grid)
 
-        result = self.transformer(scaffold, context=x, context_mask=mask)
-        result = rearrange(
-            result,
-            "(s b) (h w) d -> b s h w d",
-            s=split,
-            h=self.resolution[0],
-            w=self.resolution[1],
-        )
-        alpha = self.alpha_projection(result)
-        alpha = F.softmax(alpha, dim=1)
-        result = (result * alpha).sum(dim=1)
+        result, hiddens = self.transformer(scaffold, context=x, return_hiddens=True)
 
-        return result, alpha
+        # Last cross-attention map, mean across heads
+        attn_map = hiddens.attn_intermediates[-1].post_softmax_attn.mean(dim=1)
+
+        return result, attn_map

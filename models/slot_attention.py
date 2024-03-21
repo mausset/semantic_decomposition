@@ -39,7 +39,7 @@ class SA(pl.LightningModule):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
-    def step(self, slots, k, v):
+    def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
@@ -57,12 +57,12 @@ class SA(pl.LightningModule):
 
         slots = slots + self.mlp(self.norm_pre_ff(slots))
 
+        if return_attn:
+            return slots, attn
+
         return slots
 
     def forward(self, x):
-        _, t, _, _ = x.shape
-
-        x = rearrange(x, "b t n d -> (b t) n d")
 
         x = self.norm_input(x)
 
@@ -77,11 +77,9 @@ class SA(pl.LightningModule):
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots
-            slots = self.step(slots, k, v)
+            slots, attn_map = self.step(slots, k, v, return_attn=True)
 
-        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
-
-        return slots
+        return slots, attn_map
 
 
 class SAV2(pl.LightningModule):
@@ -121,7 +119,7 @@ class SAV2(pl.LightningModule):
 
     def step(self, slots, k, v):
 
-        q = self.inv_cross_q(self.norm_slots(slots))
+        q = self.inv_cross_q(slots)
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
         attn = dots.softmax(dim=1) + self.eps

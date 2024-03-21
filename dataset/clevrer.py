@@ -17,12 +17,10 @@ SECONDS = 5.12
 
 class CLEVRERDataset(Dataset):
     def __init__(
-        self, data_dir, split="train", n_frames=2 * FPS, resolution=[64, 96], stride=1
+        self, data_dir, split="train", n_frames=1, resolution=[64, 96], stride=1
     ) -> None:
         super().__init__()
-        self.data_dir = os.path.join(
-            data_dir, split, "video_frames"
-        )  # Updated path to match new structure
+        self.data_dir = os.path.join(data_dir, split, "video_frames")
         self.n_frames = n_frames
         self.stride = stride
         self.strided_length = n_frames * stride
@@ -69,6 +67,7 @@ class CLEVRERDataset(Dataset):
             for i in range(start, end, self.stride)
         ]
         video = self.transform(torch.stack(frames))
+        video = video.squeeze(0)  # Squeeze in case n_frames = 1
 
         return video
 
@@ -79,7 +78,7 @@ class CLEVRER(pl.LightningDataModule):
         self,
         data_dir,
         batch_size=32,
-        n_frames=2 * FPS,
+        n_frames=1,
         resolution=64,
         stride=1,
         num_workers=4,
@@ -123,7 +122,7 @@ class CLEVRER(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             persistent_workers=True,
-            shuffle=True,
+            shuffle=False,
         )
 
     def test_dataloader(self):
