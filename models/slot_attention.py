@@ -21,7 +21,7 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.concept_bank = CodeBook(slot_dim)
+        self.concept_bank = CodeBook(in_dim=input_dim, code_dim=32, n_codes=64)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
