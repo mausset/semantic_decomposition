@@ -9,7 +9,14 @@ from .components import CodeBook
 class SA(pl.LightningModule):
 
     def __init__(
-        self, input_dim, slot_dim, n_slots=7, n_iters=3, implicit=False, eps=1e-8
+        self,
+        input_dim,
+        slot_dim,
+        n_slots=7,
+        n_iters=3,
+        implicit=False,
+        n_concepts=64,
+        eps=1e-8,
     ):
         super().__init__()
         self.in_dim = input_dim
@@ -21,7 +28,7 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.concept_bank = CodeBook(in_dim=input_dim, code_dim=32, n_codes=64)
+        self.concept_bank = CodeBook(in_dim=input_dim, code_dim=32, n_codes=n_concepts)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
