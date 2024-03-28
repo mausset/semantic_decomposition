@@ -18,7 +18,6 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
     ):
-
         super().__init__()
 
         self.image_encoder = (
@@ -31,11 +30,13 @@ class SlotAE(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
+        self.slot_attention = slot_attention
+        self.feature_decoder = feature_decoder
+
+        self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
 
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
 
-        self.slot_attention = slot_attention
-        self.feature_decoder = feature_decoder
         self.dim = dim
         self.learning_rate = learning_rate
         self.resolution = resolution
@@ -70,7 +71,7 @@ class SlotAE(pl.LightningModule):
 
     # Shorthand
     def forward_features(self, x):
-        return self.image_encoder.forward_features(x)[:, 1:]
+        return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
 
     def common_step(self, x):
         features = self.forward_features(x)
