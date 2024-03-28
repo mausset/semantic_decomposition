@@ -49,7 +49,11 @@ class COCODataset(Dataset):
         filename = self._index_to_entry(index)
         file_path = os.path.join(self.data_dir, filename)
 
-        image = self.transform(read_image(file_path).float() / 255.0)
+        image = read_image(file_path).float() / 255.0
+        if image.shape[0] == 1:
+            return self.__getitem__(index + 1)
+
+        image = self.transform(image)
 
         return image
 
