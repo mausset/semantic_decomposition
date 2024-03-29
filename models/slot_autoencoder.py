@@ -17,6 +17,7 @@ class SlotAE(pl.LightningModule):
         learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
+        n_slots: int | tuple[int, int] = (3, 9),
     ):
         super().__init__()
 
@@ -41,6 +42,7 @@ class SlotAE(pl.LightningModule):
         self.learning_rate = learning_rate
         self.resolution = resolution
         self.loss_fn = loss_fn
+        self.n_slots = n_slots
 
         mean = torch.tensor([0.485, 0.456, 0.406], device=self.device)
         std = torch.tensor([0.229, 0.224, 0.225], device=self.device)
@@ -74,8 +76,14 @@ class SlotAE(pl.LightningModule):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
 
     def common_step(self, x):
+        n_slots = (
+            torch.randint(*self.n_slots, (1,)).item()
+            if isinstance(self.n_slots, tuple)
+            else self.n_slots
+        )
+
         features = self.forward_features(x)
-        slots, attn_map_slots = self.slot_attention(features)
+        slots, attn_map_slots = self.slot_attention(features, n_slots)
         decoded_features, attn_map_decoder = self.feature_decoder(slots)
         loss = self.loss_fn(decoded_features, features)
 

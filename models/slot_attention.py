@@ -12,7 +12,6 @@ class SA(pl.LightningModule):
         self,
         input_dim,
         slot_dim,
-        n_slots=7,
         n_iters=3,
         implicit=False,
         n_concepts=64,
@@ -21,7 +20,6 @@ class SA(pl.LightningModule):
         super().__init__()
         self.in_dim = input_dim
         self.slot_dim = slot_dim
-        self.n_slots = n_slots
         self.n_iters = n_iters
         self.implicit = implicit
         self.eps = eps
@@ -69,11 +67,11 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x):
+    def forward(self, x, n_slots=8):
 
         x = self.norm_input(x)
 
-        init_slots = self.concept_bank(x)
+        init_slots = self.concept_bank(x, n_slots=n_slots)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
