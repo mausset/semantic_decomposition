@@ -1,6 +1,7 @@
 import lightning as pl
 import timm
 import torch
+from torch import nn
 from torchvision.transforms import Normalize
 from einops import rearrange, repeat
 from torch.optim import AdamW
@@ -17,7 +18,8 @@ class SlotAE(pl.LightningModule):
         learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
-        n_slots: int | tuple[int, int] = (3, 9),
+        n_slots: int | tuple[int, int] = 8,
+        n_slots_val: int | tuple[int, int] = (3, 9),
     ):
         super().__init__()
 
@@ -32,6 +34,9 @@ class SlotAE(pl.LightningModule):
             .requires_grad_(False)
         )
         self.slot_attention = slot_attention
+        self.project_slot = nn.Sequential(
+            nn.Linear(slot_attention.slot_dim, dim, bias=False),
+        )
         self.feature_decoder = feature_decoder
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -43,6 +48,7 @@ class SlotAE(pl.LightningModule):
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
+        self.n_slots_val = n_slots_val
 
         mean = torch.tensor([0.485, 0.456, 0.406], device=self.device)
         std = torch.tensor([0.229, 0.224, 0.225], device=self.device)
@@ -75,15 +81,17 @@ class SlotAE(pl.LightningModule):
     def forward_features(self, x):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
 
-    def common_step(self, x):
+    def common_step(self, x, val=False):
+        slot_range = self.n_slots_val if val else self.n_slots
         n_slots = (
-            torch.randint(*self.n_slots, (1,)).item()
-            if isinstance(self.n_slots, tuple)
-            else self.n_slots
+            torch.randint(*slot_range, (1,)).item()
+            if isinstance(slot_range, tuple)
+            else slot_range
         )
 
         features = self.forward_features(x)
         slots, attn_map_slots = self.slot_attention(features, n_slots)
+        slots = self.project_slot(slots)
         decoded_features, attn_map_decoder = self.feature_decoder(slots)
         loss = self.loss_fn(decoded_features, features)
 

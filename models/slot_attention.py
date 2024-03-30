@@ -26,7 +26,9 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.concept_bank = CodeBook(in_dim=input_dim, code_dim=32, n_codes=n_concepts)
+        self.concept_bank = CodeBook(
+            in_dim=input_dim, slot_dim=slot_dim, n_codes=n_concepts
+        )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -37,10 +39,10 @@ class SA(pl.LightningModule):
         self.mlp = nn.Sequential(
             nn.Linear(slot_dim, slot_dim * 4),
             nn.ReLU(inplace=True),
-            nn.Linear(slot_dim * 4, input_dim),
+            nn.Linear(slot_dim * 4, slot_dim),
         )
 
-        self.norm_input = nn.LayerNorm(slot_dim)
+        self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 

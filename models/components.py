@@ -26,7 +26,7 @@ class CodeBook(nn.Module):
     def __init__(
         self,
         in_dim,
-        code_dim,
+        slot_dim,
         n_codes=64,
         usage_threshold=1e-9,
         sign_disambiguation=True,
@@ -34,30 +34,22 @@ class CodeBook(nn.Module):
         super().__init__()
 
         self.in_dim = in_dim
-        self.code_dim = code_dim
+        self.slot_dim = slot_dim
         self.n_codes = n_codes
         self.usage_threshold = usage_threshold
 
         self.sign_disambiguation = sign_disambiguation
 
-        self.mu = nn.Parameter(torch.randn(n_codes, code_dim))
+        self.mu = nn.Parameter(torch.randn(n_codes, in_dim))
 
-        log_sigma = torch.empty(n_codes, 1, code_dim)
+        log_sigma = torch.empty(n_codes, 1, in_dim)
         nn.init.xavier_uniform_(log_sigma)
         self.log_sigma = nn.Parameter(log_sigma.squeeze())
 
-        self.down_project = nn.Sequential(
-            nn.LayerNorm(in_dim),
-            nn.Linear(in_dim, in_dim),
-            nn.ReLU(),
-            nn.Linear(in_dim, code_dim),
-        )
-
         self.up_project = nn.Sequential(
-            nn.Linear(code_dim, in_dim),
-            nn.ReLU(),
             nn.Linear(in_dim, in_dim),
-            nn.LayerNorm(in_dim),
+            nn.ReLU(),
+            nn.Linear(in_dim, slot_dim),
         )
 
         self.register_buffer("usage", torch.ones(n_codes))
@@ -98,7 +90,6 @@ class CodeBook(nn.Module):
         return projection, eig_values
 
     def quantize(self, x):
-        x = self.down_project(x)
 
         cosine_sim = F.cosine_similarity(
             x.unsqueeze(2), self.mu.unsqueeze(0).unsqueeze(0), dim=-1
