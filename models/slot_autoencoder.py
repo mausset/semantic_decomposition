@@ -36,6 +36,7 @@ class SlotAE(pl.LightningModule):
         self.slot_attention = slot_attention
         self.project_slot = nn.Sequential(
             nn.Linear(slot_attention.slot_dim, dim, bias=False),
+            nn.LayerNorm(dim),
         )
         self.feature_decoder = feature_decoder
 
@@ -109,7 +110,7 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        loss, attn_map, mean_norm, mean_spread = self.common_step(x)
+        loss, attn_map, mean_norm, mean_spread = self.common_step(x, val=True)
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.log("val/mean_norm", mean_norm, sync_dist=True)
         self.log("val/mean_spread", mean_spread, sync_dist=True)
