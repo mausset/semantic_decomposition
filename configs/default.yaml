@@ -1,55 +1,45 @@
 seed_everything: 42
 
 model:
-  class_path: models.jepa.EMAJEPA
+  class_path: models.slot_autoencoder.SlotAE
   init_args:
-    dim: 64
-    ema_alpha: 0.996
-    learning_rate: 5e-4
-    warmup_epochs: 1
-    loss_fn:
+    dim: 384 
+    learning_rate: 2e-4
+    resolution: [224, 224]
+    n_slots: 8
+    n_slots_val: [3, 9]
+    loss_fn: 
       class_path: torch.nn.MSELoss
-    base_model: 
-      class_path: models.jepa.SlotJEPA
+    image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
+    slot_attention:
+      class_path: models.slot_attention.SA
       init_args:
-        image_encoder:
-          class_path: models.encoder.ResNetEncoder
-          init_args:
-            dim: ${.....dim}
-            depth: 4
-        slot_attention:
-          class_path: models.slot_attention.SA
-          init_args:
-            input_dim: ${.....dim}
-            slot_dim: ${.....dim}
-            n_slots: 7
-            implicit: True
-        feature_decoder:
-          class_path: models.decoder.SpatialBroadcastDecoder
-          init_args:
-            dim: ${...dim}
-            depth: 4
-            init_resolution: [8, 8]
-            features: True
+        input_dim: ${...dim}
+        slot_dim: 256
+        n_iters: 5
+        implicit: True
+    feature_decoder:
+      class_path: models.decoder.TransformerDecoder
+      init_args:
         dim: ${...dim}
-        predictor_depth: 4
+        depth: 4
+        resolution: [16, 16]
 
 data:
   class_path: dataset.clevrer.CLEVRER
   init_args:
     data_dir: ./data/clevrer
     num_workers: 7
-    n_frames: 20
-    batch_size: 1
-    resolution: 128
-    stride: 5
+    batch_size: 32
+    resolution: 224
 
 trainer:
-  callbacks:
-    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+  accumulate_grad_batches: 2
   logger: 
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
       project: "semdec"
       save_dir: ./lightning_logs
-  log_every_n_steps: 3
+  val_check_interval: 0.01
+  limit_val_batches: 1
+  log_every_n_steps: 5

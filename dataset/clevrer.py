@@ -3,7 +3,13 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import lightning as pl
 from torchvision.io import read_image
-from torchvision.transforms import Compose, Resize, CenterCrop, RandomHorizontalFlip
+from torchvision.transforms import (
+    Compose,
+    Resize,
+    CenterCrop,
+    RandomHorizontalFlip,
+    Normalize,
+)
 
 FPS = 25
 SECONDS = 5.12
@@ -11,12 +17,10 @@ SECONDS = 5.12
 
 class CLEVRERDataset(Dataset):
     def __init__(
-        self, data_dir, split="train", n_frames=2 * FPS, resolution=[64, 96], stride=1
+        self, data_dir, split="train", n_frames=1, resolution=[64, 96], stride=1
     ) -> None:
         super().__init__()
-        self.data_dir = os.path.join(
-            data_dir, split, "video_frames"
-        )  # Updated path to match new structure
+        self.data_dir = os.path.join(data_dir, split, "video_frames")
         self.n_frames = n_frames
         self.stride = stride
         self.strided_length = n_frames * stride
@@ -25,7 +29,12 @@ class CLEVRERDataset(Dataset):
         self.db = self._load_db()
 
         self.transform = Compose(
-            [Resize(resolution), CenterCrop(resolution), RandomHorizontalFlip()]
+            [
+                Resize(resolution),
+                CenterCrop(resolution),
+                RandomHorizontalFlip(),
+                Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ]
         )
 
     def _load_db(self):
@@ -37,9 +46,6 @@ class CLEVRERDataset(Dataset):
         return db
 
     def _index_to_entry(self, index):
-        total_frames = sum([frame_count for _, frame_count in self.db])
-        if index >= total_frames - self.strided_length:
-            raise ValueError("Index out of range")
 
         for video_name, frame_count in self.db:
             if index + self.strided_length <= frame_count:
@@ -58,6 +64,7 @@ class CLEVRERDataset(Dataset):
             for i in range(start, end, self.stride)
         ]
         video = self.transform(torch.stack(frames))
+        video = video.squeeze(0)  # Squeeze in case n_frames = 1
 
         return video
 
@@ -68,7 +75,7 @@ class CLEVRER(pl.LightningDataModule):
         self,
         data_dir,
         batch_size=32,
-        n_frames=2 * FPS,
+        n_frames=1,
         resolution=64,
         stride=1,
         num_workers=4,
