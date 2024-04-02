@@ -50,6 +50,7 @@ class CodeBook(nn.Module):
             nn.Linear(in_dim, in_dim),
             nn.ReLU(),
             nn.Linear(in_dim, slot_dim),
+            nn.LayerNorm(slot_dim),
         )
 
         self.register_buffer("usage", torch.ones(n_codes))
