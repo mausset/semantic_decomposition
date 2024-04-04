@@ -26,9 +26,9 @@ model:
         resolution: [16, 16]
 
 data:
-  class_path: dataset.clevrer.CLEVRER
+  class_path: dataset.coco.COCO
   init_args:
-    data_dir: ./data/clevrer
+    data_dir: ./data/coco/coco2017
     num_workers: 7
     batch_size: 32
     resolution: 224

@@ -1,13 +1,10 @@
 import lightning as pl
 import timm
-import numpy as np
-import seaborn as sns
 import torch
 from torch import nn
-from torch.nn import functional as F
-from torchvision.transforms import Normalize
-from einops import rearrange, repeat
 from torch.optim import AdamW
+
+from utils.plot import plot_attention
 
 
 class SlotAE(pl.LightningModule):
@@ -54,39 +51,6 @@ class SlotAE(pl.LightningModule):
         self.n_slots = n_slots
         self.n_slots_val = n_slots_val
 
-        mean = torch.tensor([0.485, 0.456, 0.406], device=self.device)
-        std = torch.tensor([0.229, 0.224, 0.225], device=self.device)
-        self.denormalize = Normalize((-mean / std).tolist(), (1.0 / std).tolist())
-
-    def plot_attention(self, attn_map, x, palette="muted", alpha=0.4):
-        attn_map = rearrange(
-            attn_map, "(h w) n -> h w n", h=self.resolution[0] // self.patch_size
-        )
-        max_idx = attn_map.argmax(dim=-1, keepdim=True)
-
-        attn_mask = (
-            F.one_hot(max_idx.squeeze(-1), num_classes=attn_map.shape[-1])
-            .float()
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-        )
-
-        attn_mask = F.interpolate(
-            attn_mask, scale_factor=self.patch_size, mode="nearest"
-        ).squeeze(0)
-
-        palette = np.array(sns.color_palette(palette, attn_map.shape[-1]))
-        colors = torch.tensor(palette[:, :3], dtype=torch.float32).to(x.device)
-        attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
-        colors = repeat(colors, "n c -> n c 1 1")
-        segmented_img = (colors * attn_mask).sum(dim=0)
-
-        img = self.denormalize(x)
-        overlayed_img = img * alpha + segmented_img * (1 - alpha)
-        combined_img = torch.cat([img, overlayed_img], dim=2)
-
-        return combined_img
-
     # Shorthand
     def forward_features(self, x):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
@@ -100,31 +64,24 @@ class SlotAE(pl.LightningModule):
         )
 
         features = self.forward_features(x)
-        slots, attn_map_slots = self.slot_attention(features, n_slots)
+        slots, attn_map_sa = self.slot_attention(features, n_slots)
         slots = self.project_slot(slots)
         decoded_features, attn_map_decoder = self.feature_decoder(slots)
         loss = self.loss_fn(decoded_features, features)
 
-        slots = rearrange(slots, "b n d -> (b n) d")
-        mean_norm = torch.mean(torch.norm(slots, dim=-1))
-        mean_spread = torch.var(slots, dim=0).mean()
-
-        return loss, attn_map_decoder, mean_norm, mean_spread
+        return loss, attn_map_sa, attn_map_decoder
 
     def training_step(self, x):
-        loss, _, mean_norm, mean_spread = self.common_step(x)
+        loss, _, _ = self.common_step(x)
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
-        self.log("train/mean_norm", mean_norm, sync_dist=True)
-        self.log("train/mean_spread", mean_spread, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, x):
-        loss, attn_map, mean_norm, mean_spread = self.common_step(x, val=True)
+        loss, attn_map_sa, attn_map_decoder = self.common_step(x, val=True)
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
-        self.log("val/mean_norm", mean_norm, sync_dist=True)
-        self.log("val/mean_spread", mean_spread, sync_dist=True)
         self.logger.log_image(
-            key="attention", images=[self.plot_attention(attn_map[0], x[0])]
+            key="attention",
+            images=[plot_attention(x[0], attn_map_sa[0], attn_map_decoder[0])],
         )
         return loss
 

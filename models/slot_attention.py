@@ -86,4 +86,6 @@ class SA(pl.LightningModule):
             slots = slots.detach() - init_slots.detach() + init_slots
             slots, attn_map = self.step(slots, k, v, return_attn=True)
 
+        attn_map = rearrange(attn_map, "b n hw -> b hw n")
+
         return slots, attn_map
