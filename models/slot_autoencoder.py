@@ -1,7 +1,10 @@
 import lightning as pl
 import timm
+import numpy as np
+import seaborn as sns
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torchvision.transforms import Normalize
 from einops import rearrange, repeat
 from torch.optim import AdamW
@@ -55,28 +58,34 @@ class SlotAE(pl.LightningModule):
         std = torch.tensor([0.229, 0.224, 0.225], device=self.device)
         self.denormalize = Normalize((-mean / std).tolist(), (1.0 / std).tolist())
 
-    def plot_attention(self, attn_map, x):
+    def plot_attention(self, attn_map, x, palette="muted", alpha=0.4):
+        attn_map = rearrange(
+            attn_map, "(h w) n -> h w n", h=self.resolution[0] // self.patch_size
+        )
         max_idx = attn_map.argmax(dim=-1, keepdim=True)
-        attn_mask = torch.zeros_like(attn_map).scatter_(-1, max_idx, 1)
 
-        h, w = (
-            self.resolution[0] // self.patch_size,
-            self.resolution[1] // self.patch_size,
+        attn_mask = (
+            F.one_hot(max_idx.squeeze(-1), num_classes=attn_map.shape[-1])
+            .float()
+            .permute(2, 0, 1)
+            .unsqueeze(0)
         )
-        attn_mask = repeat(
-            attn_mask,
-            "(h w) n -> c (h hr) (n w wr)",
-            h=h,
-            hr=self.patch_size,
-            w=w,
-            wr=self.patch_size,
-            c=3,
-        )
+
+        attn_mask = F.interpolate(
+            attn_mask, scale_factor=self.patch_size, mode="nearest"
+        ).squeeze(0)
+
+        palette = np.array(sns.color_palette(palette, attn_map.shape[-1]))
+        colors = torch.tensor(palette[:, :3], dtype=torch.float32).to(x.device)
+        attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
+        colors = repeat(colors, "n c -> n c 1 1")
+        segmented_img = (colors * attn_mask).sum(dim=0)
+
         img = self.denormalize(x)
-        img_repeat = repeat(img, "c h w -> c h (n w)", n=attn_map.shape[-1])
-        masked = img_repeat * attn_mask
-        img = torch.cat([img, masked], dim=2)
-        return img
+        overlayed_img = img * alpha + segmented_img * (1 - alpha)
+        combined_img = torch.cat([img, overlayed_img], dim=2)
+
+        return combined_img
 
     # Shorthand
     def forward_features(self, x):
