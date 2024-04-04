@@ -81,7 +81,15 @@ class SlotAE(pl.LightningModule):
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.logger.log_image(
             key="attention",
-            images=[plot_attention(x[0], attn_map_sa[0], attn_map_decoder[0])],
+            images=[
+                plot_attention(
+                    x[0],
+                    attn_map_sa[0],
+                    attn_map_decoder[0],
+                    res=self.resolution[0],
+                    patch_size=self.patch_size,
+                )
+            ],
         )
         return loss
 
