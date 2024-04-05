@@ -1,9 +1,9 @@
 import lightning as pl
 import torch
 from torch import nn
-from einops import rearrange
+from einops import rearrange, repeat
 
-from .components import CodeBook
+from models.components import CodeBook
 
 
 class SA(pl.LightningModule):
@@ -30,6 +30,11 @@ class SA(pl.LightningModule):
             in_dim=input_dim, slot_dim=slot_dim, n_codes=n_concepts
         )
 
+        self.init_mu = nn.Parameter(torch.randn(slot_dim))
+        init_log_sigma = torch.empty((1, 1, slot_dim))
+        nn.init.xavier_uniform_(init_log_sigma)
+        self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
@@ -45,6 +50,14 @@ class SA(pl.LightningModule):
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
+
+    def sample_slots(self, b, n_slots):
+        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
+        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
+
+        sample = mu + log_sigma.exp() * torch.randn_like(mu)
+
+        return sample
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
@@ -69,11 +82,16 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, n_slots=8):
+    def forward(self, x, n_slots=8, init_sample=False):
+        b, _, _ = x.shape
 
         x = self.norm_input(x)
 
-        init_slots = self.concept_bank(x, n_slots=n_slots)
+        if init_sample:
+            init_slots = self.sample_slots(b, n_slots)
+        else:
+            init_slots = self.concept_bank(x, n_slots=n_slots)
+
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
