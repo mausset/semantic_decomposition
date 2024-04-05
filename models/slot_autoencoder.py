@@ -84,8 +84,7 @@ class SlotAE(pl.LightningModule):
             images=[
                 plot_attention(
                     x[0],
-                    attn_map_sa[0],
-                    attn_map_decoder[0],
+                    [attn_map_sa[0], attn_map_decoder[0]],
                     res=self.resolution[0],
                     patch_size=self.patch_size,
                 )
