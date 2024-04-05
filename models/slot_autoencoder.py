@@ -83,18 +83,28 @@ class SlotAE(pl.LightningModule):
             attn_maps.append((attn_map_sa, attn_map_decoder))
             losses.append(self.loss_fn(decoded_features, features))
 
-        loss = torch.stack(losses).sum()
-
-        return loss, attn_maps
+        return losses, attn_maps
 
     def training_step(self, x):
-        loss, _ = self.common_step(x)
+        losses, _ = self.common_step(x)
+
+        for i, loss in enumerate(losses):
+            self.log(f"train/loss_{i}", loss, sync_dist=True)
+
+        loss = torch.stack(losses).mean()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
+
         return loss
 
     def validation_step(self, x):
-        loss, attn_maps = self.common_step(x)
+        losses, attn_maps = self.common_step(x)
+
+        for i, loss in enumerate(losses):
+            self.log(f"val/loss_{i}", loss, sync_dist=True)
+
+        loss = torch.stack(losses).mean()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
+
         self.logger.log_image(
             key="attention",
             images=[
