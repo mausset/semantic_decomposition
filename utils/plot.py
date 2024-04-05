@@ -20,7 +20,7 @@ def plot_attention(
     palette="muted",
     alpha=0.4,
 ):
-    _, n = attn_maps[0].shape
+    _, n = attn_maps[0][0].shape
 
     img = denormalize_imagenet(img)
 
@@ -30,6 +30,7 @@ def plot_attention(
 
     cat_imgs = [img]
     for attn_map in attn_maps:
+        attn_map = attn_map[0]
         attn_map = rearrange(attn_map, "(h w) n -> h w n", h=res // patch_size)
         max_idx = attn_map.argmax(dim=-1, keepdim=True)
 
@@ -51,3 +52,19 @@ def plot_attention(
     cat_img = torch.cat(cat_imgs, dim=2)
 
     return cat_img
+
+
+def plot_attention_hierarchical(
+    img,
+    attn_maps,
+    res=224,
+    patch_size=14,
+    palette="muted",
+    alpha=0.4,
+):
+
+    collect = []
+    for attn_t in attn_maps:
+        collect.append(plot_attention(img, attn_t, res, patch_size, palette, alpha))
+
+    return torch.cat(collect, dim=1)

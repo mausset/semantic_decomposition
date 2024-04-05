@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.optim import AdamW
 
-from utils.plot import plot_attention
+from utils.plot import plot_attention, plot_attention_hierarchical
 
 
 class SlotAE(pl.LightningModule):
@@ -18,8 +18,7 @@ class SlotAE(pl.LightningModule):
         learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
-        n_slots: int | tuple[int, int] = 8,
-        n_slots_val: int | tuple[int, int] = (3, 9),
+        n_slots: int | list[int, int] = [16, 8],
     ):
         super().__init__()
 
@@ -49,42 +48,59 @@ class SlotAE(pl.LightningModule):
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
-        self.n_slots_val = n_slots_val
 
     # Shorthand
     def forward_features(self, x):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
 
-    def common_step(self, x, val=False):
-        slot_range = self.n_slots_val if val else self.n_slots
-        n_slots = (
-            torch.randint(*slot_range, (1,)).item()
-            if isinstance(slot_range, tuple)
-            else slot_range
-        )
+    def common_step(self, x):
+
+        slots_collection = []
+        attn_maps = []
+        losses = []
 
         features = self.forward_features(x)
-        slots, attn_map_sa = self.slot_attention(features, n_slots, init_sample=True)
+        slots, attn_map_sa = self.slot_attention(
+            features, self.n_slots[0], init_sample=True
+        )
         slots = self.project_slot(slots)
         decoded_features, attn_map_decoder = self.feature_decoder(slots)
-        loss = self.loss_fn(decoded_features, features)
 
-        return loss, attn_map_sa, attn_map_decoder
+        slots_collection.append(slots)
+        attn_maps.append((attn_map_sa, attn_map_decoder))
+        losses.append(self.loss_fn(decoded_features, features))
+
+        for n_slots in self.n_slots[1:]:
+            slots, attn_map_sa = self.slot_attention(
+                slots_collection[-1], n_slots, init_sample=True
+            )
+            slots = self.project_slot(slots)
+            decoded_features, attn_map_decoder = self.feature_decoder(slots)
+
+            attn_map_sa = attn_maps[-1][0] @ attn_map_sa  # Propagate attention
+
+            slots_collection.append(slots)
+            attn_maps.append((attn_map_sa, attn_map_decoder))
+            losses.append(self.loss_fn(decoded_features, features))
+
+        loss = torch.stack(losses).sum()
+
+        return loss, attn_maps
 
     def training_step(self, x):
-        loss, _, _ = self.common_step(x)
+        loss, _ = self.common_step(x)
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, x):
-        loss, attn_map_sa, attn_map_decoder = self.common_step(x, val=True)
+        loss, attn_maps = self.common_step(x)
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
         self.logger.log_image(
             key="attention",
             images=[
-                plot_attention(
+                plot_attention_hierarchical(
                     x[0],
-                    [attn_map_sa[0], attn_map_decoder[0]],
+                    attn_maps,
                     res=self.resolution[0],
                     patch_size=self.patch_size,
                 )

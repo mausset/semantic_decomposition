@@ -6,8 +6,7 @@ model:
     dim: 384 
     learning_rate: 2e-4
     resolution: [224, 224]
-    n_slots: 8
-    n_slots_val: [3, 9]
+    n_slots: [16, 8]
     loss_fn: 
       class_path: torch.nn.MSELoss
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
