@@ -32,6 +32,7 @@ class SlotAE(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
+        self.norm_features = nn.LayerNorm(dim)
         self.slot_attention = slot_attention
         self.project_slot = nn.Sequential(
             nn.Linear(slot_attention.slot_dim, dim, bias=False),
@@ -61,7 +62,7 @@ class SlotAE(pl.LightningModule):
 
         features = self.forward_features(x)
         slots, attn_map_sa = self.slot_attention(
-            features, self.n_slots[0], init_sample=True
+            self.norm_features(features), self.n_slots[0], init_sample=True
         )
         slots_collection.append(slots)
 
