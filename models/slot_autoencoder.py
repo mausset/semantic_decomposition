@@ -74,12 +74,14 @@ class SlotAE(pl.LightningModule):
             slots, attn_map_sa = self.slot_attention(
                 slots_collection[-1], n_slots, init_sample=True
             )
+
+            slots_collection.append(slots)  # Slots saved before projection
+
             slots = self.project_slot(slots)
             decoded_features, attn_map_decoder = self.feature_decoder(slots)
 
             attn_map_sa = attn_maps[-1][0] @ attn_map_sa  # Propagate attention
 
-            slots_collection.append(slots)
             attn_maps.append((attn_map_sa, attn_map_decoder))
             losses.append(self.loss_fn(decoded_features, features))
 
