@@ -59,6 +59,7 @@ class SlotAE(pl.LightningModule):
         features = self.forward_features(x)
         slots = self.norm_features(features)
 
+        losses = []
         attn_maps = []
         for n_slots in self.n_slots:
             slots, attn_map_sa = self.slot_attention(slots, n_slots, init_sample=True)
@@ -68,9 +69,10 @@ class SlotAE(pl.LightningModule):
 
             attn_maps.append((attn_map_sa,))
 
-        slots = self.project_slot(slots)
-        decoded_features, _ = self.feature_decoder(slots)
-        losses = [self.loss_fn(decoded_features, features)]
+            proj_slots = self.project_slot(slots)
+            decoded_features, _ = self.feature_decoder(proj_slots)
+            losses.append(self.loss_fn(decoded_features, features))
+            slots = slots.detach()
 
         return losses, attn_maps
 
