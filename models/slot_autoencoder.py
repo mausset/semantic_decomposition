@@ -1,10 +1,10 @@
 import lightning as pl
 import timm
 import torch
+from models.slot_attention import SA
 from torch import nn
 from torch.optim import AdamW
-
-from utils.plot import plot_attention, plot_attention_hierarchical
+from utils.plot import plot_attention_hierarchical
 
 
 class SlotAE(pl.LightningModule):
@@ -12,7 +12,7 @@ class SlotAE(pl.LightningModule):
     def __init__(
         self,
         image_encoder_name,
-        slot_attention: pl.LightningModule,
+        slot_attention_args: dict,
         feature_decoder: pl.LightningModule,
         dim: int,
         learning_rate: float,
@@ -32,12 +32,21 @@ class SlotAE(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
-        self.norm_features = nn.LayerNorm(dim)
-        self.slot_attention = slot_attention
-        self.project_slot = nn.Sequential(
-            nn.Linear(slot_attention.slot_dim, dim, bias=False),
-            nn.LayerNorm(dim),
+
+        self.slot_attention = nn.ModuleList(
+            [SA(**slot_attention_args) for _ in n_slots]
         )
+
+        self.project_slots = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
+                    nn.LayerNorm(dim),
+                )
+                for _ in n_slots
+            ]
+        )
+
         self.feature_decoder = feature_decoder
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -57,20 +66,22 @@ class SlotAE(pl.LightningModule):
     def common_step(self, x):
 
         features = self.forward_features(x)
-        slots = self.norm_features(features)
+        slots = features
 
         losses = []
         attn_maps = []
-        for n_slots in self.n_slots:
-            slots, attn_map_sa = self.slot_attention(slots, n_slots, init_sample=True)
+        for n_slots, slot_attention, project_slots in zip(
+            self.n_slots, self.slot_attention, self.project_slots
+        ):
+            slots, attn_map = slot_attention(slots, n_slots, init_sample=True)
 
             if attn_maps:
-                attn_map_sa = attn_maps[-1][0] @ attn_map_sa  # Propagate attention
+                attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
 
-            attn_maps.append((attn_map_sa,))
+            attn_maps.append((attn_map,))
 
-            proj_slots = self.project_slot(slots)
-            decoded_features, _ = self.feature_decoder(proj_slots)
+            dec_slots = project_slots(slots)
+            decoded_features, _ = self.feature_decoder(dec_slots)
             losses.append(self.loss_fn(decoded_features, features))
 
         return losses, attn_maps
@@ -78,8 +89,8 @@ class SlotAE(pl.LightningModule):
     def training_step(self, x):
         losses, _ = self.common_step(x)
 
-        for i, loss in enumerate(losses):
-            self.log(f"train/loss_{i}", loss, sync_dist=True)
+        for loss, n_slots in zip(losses, self.n_slots):
+            self.log(f"train/loss_{n_slots}", loss, sync_dist=True)
 
         loss = torch.stack(losses).mean()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
@@ -89,8 +100,8 @@ class SlotAE(pl.LightningModule):
     def validation_step(self, x):
         losses, attn_maps = self.common_step(x)
 
-        for i, loss in enumerate(losses):
-            self.log(f"val/loss_{i}", loss, sync_dist=True)
+        for loss, n_slots in zip(losses, self.n_slots):
+            self.log(f"val/loss_{n_slots}", loss, sync_dist=True)
 
         loss = torch.stack(losses).mean()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
