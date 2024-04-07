@@ -47,7 +47,7 @@ class SA(pl.LightningModule):
             nn.Linear(slot_dim * 4, slot_dim),
         )
 
-        self.norm_input = nn.LayerNorm(input_dim)
+        # self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
@@ -85,7 +85,7 @@ class SA(pl.LightningModule):
     def forward(self, x, n_slots=8, init_sample=False):
         b, _, _ = x.shape
 
-        x = self.norm_input(x)
+        # x = self.norm_input(x)
 
         if init_sample:
             init_slots = self.sample_slots(b, n_slots)

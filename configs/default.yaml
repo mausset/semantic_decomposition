@@ -14,7 +14,7 @@ model:
       class_path: models.slot_attention.SA
       init_args:
         input_dim: ${...dim}
-        slot_dim: 256
+        slot_dim: ${...dim}
         n_iters: 5
         implicit: True
     feature_decoder:

@@ -32,6 +32,7 @@ class SlotAE(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
+        self.norm_features = nn.LayerNorm(dim)
         self.slot_attention = slot_attention
         self.project_slot = nn.Sequential(
             nn.Linear(slot_attention.slot_dim, dim, bias=False),
@@ -55,33 +56,21 @@ class SlotAE(pl.LightningModule):
 
     def common_step(self, x):
 
-        slots_collection = []
-        attn_maps = []
-        losses = []
-
         features = self.forward_features(x)
-        slots, attn_map_sa = self.slot_attention(
-            features, self.n_slots[0], init_sample=True
-        )
+        slots = self.norm_features(features)
+
+        attn_maps = []
+        for n_slots in self.n_slots:
+            slots, attn_map_sa = self.slot_attention(slots, n_slots, init_sample=True)
+
+            if attn_maps:
+                attn_map_sa = attn_maps[-1][0] @ attn_map_sa  # Propagate attention
+
+            attn_maps.append((attn_map_sa,))
+
         slots = self.project_slot(slots)
-        decoded_features, attn_map_decoder = self.feature_decoder(slots)
-
-        slots_collection.append(slots)
-        attn_maps.append((attn_map_sa, attn_map_decoder))
-        losses.append(self.loss_fn(decoded_features, features))
-
-        for n_slots in self.n_slots[1:]:
-            slots, attn_map_sa = self.slot_attention(
-                slots_collection[-1], n_slots, init_sample=True
-            )
-            slots = self.project_slot(slots)
-            decoded_features, attn_map_decoder = self.feature_decoder(slots)
-
-            attn_map_sa = attn_maps[-1][0] @ attn_map_sa  # Propagate attention
-
-            slots_collection.append(slots)
-            attn_maps.append((attn_map_sa, attn_map_decoder))
-            losses.append(self.loss_fn(decoded_features, features))
+        decoded_features, _ = self.feature_decoder(slots)
+        losses = [self.loss_fn(decoded_features, features)]
 
         return losses, attn_maps
 
