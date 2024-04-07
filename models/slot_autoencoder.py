@@ -72,7 +72,6 @@ class SlotAE(pl.LightningModule):
             proj_slots = self.project_slot(slots)
             decoded_features, _ = self.feature_decoder(proj_slots)
             losses.append(self.loss_fn(decoded_features, features))
-            slots = slots.detach()
 
         return losses, attn_maps
 
