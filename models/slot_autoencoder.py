@@ -13,6 +13,7 @@ class SlotAE(pl.LightningModule):
         self,
         image_encoder_name,
         slot_attention_args: dict,
+        sample_strategy: list,
         feature_decoder: pl.LightningModule,
         dim: int,
         learning_rate: float,
@@ -35,8 +36,8 @@ class SlotAE(pl.LightningModule):
 
         self.slot_attention = nn.ModuleList(
             [
-                SA(**slot_attention_args, sample_strategy="learned" if i else "prior")
-                for i, _ in enumerate(n_slots)
+                SA(**slot_attention_args, sample_strategy=strat)
+                for strat in sample_strategy
             ]
         )
 
