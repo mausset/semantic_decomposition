@@ -1,10 +1,7 @@
 import lightning as pl
-from numpy import who
 import torch
 from torch import nn
 from einops import rearrange, repeat
-
-from models.components import CodeBook
 
 from x_transformers import Encoder
 
@@ -35,6 +32,10 @@ class SA(pl.LightningModule):
             init_log_sigma = torch.empty((1, 1, slot_dim))
             nn.init.xavier_uniform_(init_log_sigma)
             self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
+        elif sample_strategy == "gating":
+            self.gate = nn.Linear(input_dim, 1, bias=False)
+
         elif sample_strategy == "learned":
             self.dist_encoder = Encoder(
                 dim=slot_dim,
@@ -90,6 +91,20 @@ class SA(pl.LightningModule):
 
         return sample
 
+    def sample_gating(self, x, n_slots):
+        r = self.gate(x)
+
+        importance = r.softmax(dim=1)
+
+        idx = torch.topk(importance, n_slots, dim=1).indices
+
+        slots = torch.gather(x, 1, idx.expand(-1, -1, x.size(-1)))
+
+        # Squeeze due to strange mps bug
+        selected_r = torch.gather(r.squeeze(-1), 1, idx.squeeze(-1)).unsqueeze(-1)
+
+        return slots * selected_r
+
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
 
@@ -120,6 +135,8 @@ class SA(pl.LightningModule):
 
         if self.sample_strategy == "prior":
             init_slots = self.sample_prior(b, n_slots)
+        elif self.sample_strategy == "gating":
+            init_slots = self.sample_gating(x, n_slots)
         elif self.sample_strategy == "learned":
             init_slots = self.sample_learned(x, n_slots)
 
