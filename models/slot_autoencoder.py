@@ -34,7 +34,10 @@ class SlotAE(pl.LightningModule):
         )
 
         self.slot_attention = nn.ModuleList(
-            [SA(**slot_attention_args) for _ in n_slots]
+            [
+                SA(**slot_attention_args, sample_strategy="learned" if i else "prior")
+                for i, _ in enumerate(n_slots)
+            ]
         )
 
         self.project_slots = nn.ModuleList(
@@ -73,7 +76,7 @@ class SlotAE(pl.LightningModule):
         for n_slots, slot_attention, project_slots in zip(
             self.n_slots, self.slot_attention, self.project_slots
         ):
-            slots, attn_map = slot_attention(slots, n_slots, init_sample=True)
+            slots, attn_map = slot_attention(slots, n_slots)
 
             if attn_maps:
                 attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention

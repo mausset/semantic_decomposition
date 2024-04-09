@@ -17,7 +17,7 @@ class SA(pl.LightningModule):
         slot_dim,
         n_iters=3,
         implicit=False,
-        n_concepts=64,
+        sample_strategy="prior",
         eps=1e-8,
     ):
         super().__init__()
@@ -25,36 +25,34 @@ class SA(pl.LightningModule):
         self.slot_dim = slot_dim
         self.n_iters = n_iters
         self.implicit = implicit
+        self.sample_strategy = sample_strategy
         self.eps = eps
 
         self.scale = input_dim**-0.5
 
-        # self.concept_bank = CodeBook(
-        #     in_dim=input_dim, slot_dim=slot_dim, n_codes=n_concepts
-        # )
+        if sample_strategy == "prior":
+            self.init_mu = nn.Parameter(torch.randn(slot_dim))
+            init_log_sigma = torch.empty((1, 1, slot_dim))
+            nn.init.xavier_uniform_(init_log_sigma)
+            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+        elif sample_strategy == "learned":
+            self.dist_encoder = Encoder(
+                dim=slot_dim,
+                depth=2,
+                ff_glu=True,
+                ff_swish=True,
+            )
 
-        # self.init_mu = nn.Parameter(torch.randn(slot_dim))
-        # init_log_sigma = torch.empty((1, 1, slot_dim))
-        # nn.init.xavier_uniform_(init_log_sigma)
-        # self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
-
-        self.dist_encoder = Encoder(
-            dim=slot_dim,
-            depth=2,
-            ff_glu=True,
-            ff_swish=True,
-        )
-
-        self.mu_projection = nn.Sequential(
-            nn.Linear(slot_dim, slot_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(slot_dim, slot_dim),
-        )
-        self.log_sigma_projection = nn.Sequential(
-            nn.Linear(slot_dim, slot_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(slot_dim, slot_dim),
-        )
+            self.mu_projection = nn.Sequential(
+                nn.Linear(slot_dim, slot_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(slot_dim, slot_dim),
+            )
+            self.log_sigma_projection = nn.Sequential(
+                nn.Linear(slot_dim, slot_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(slot_dim, slot_dim),
+            )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -72,10 +70,15 @@ class SA(pl.LightningModule):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
-    def sample_slots(self, x, b, n_slots):
-        # mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
-        # log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
+    def sample_prior(self, b, n_slots):
+        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
+        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
 
+        sample = mu + log_sigma.exp() * torch.randn_like(mu)
+
+        return sample
+
+    def sample_learned(self, x, n_slots):
         x = self.dist_encoder(x).mean(dim=1)
         mu = self.mu_projection(x)
         log_sigma = self.log_sigma_projection(x)
@@ -110,15 +113,15 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, n_slots=8, init_sample=False):
+    def forward(self, x, n_slots=8):
         b, _, _ = x.shape
 
         x = self.norm_input(x)
 
-        if init_sample:
-            init_slots = self.sample_slots(x, b, n_slots)
-        else:
-            init_slots = self.concept_bank(x, n_slots=n_slots)
+        if self.sample_strategy == "prior":
+            init_slots = self.sample_prior(b, n_slots)
+        elif self.sample_strategy == "learned":
+            init_slots = self.sample_learned(x, n_slots)
 
         slots = init_slots.clone()
 
