@@ -44,12 +44,12 @@ class SA(pl.LightningModule):
             )
 
             self.mu_projection = nn.Sequential(
-                nn.Linear(slot_dim, slot_dim),
+                nn.Linear(slot_dim, slot_dim, bias=False)
                 # nn.ReLU(inplace=True),
                 # nn.Linear(slot_dim, slot_dim),
             )
             self.log_sigma_projection = nn.Sequential(
-                nn.Linear(slot_dim, slot_dim),
+                nn.Linear(slot_dim, slot_dim, bias=False)
                 # nn.ReLU(inplace=True),
                 # nn.Linear(slot_dim, slot_dim),
             )
