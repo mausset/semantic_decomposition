@@ -98,8 +98,8 @@ class SA(pl.LightningModule):
         return sample
 
     def sample_gating(self, x, n_slots):
-        x = self.encoder(x)
-        r = self.gate(x)
+        encoded_x = self.encoder(x)
+        r = self.gate(encoded_x)
 
         importance = r.softmax(dim=1)
 
