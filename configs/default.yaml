@@ -10,6 +10,7 @@ model:
     loss_fn: 
       class_path: torch.nn.MSELoss
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
+    slot_attention_arch: sat
     slot_attention_args:
       input_dim: ${..dim}
       slot_dim: ${..dim}
@@ -17,7 +18,7 @@ model:
       implicit: True
     sample_strategy:
       - prior
-      - learned
+      - prior
     feature_decoder:
       class_path: models.decoder.TransformerDecoder
       init_args:

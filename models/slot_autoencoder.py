@@ -1,7 +1,7 @@
 import lightning as pl
 import timm
 import torch
-from models.slot_attention import SA
+from models.slot_attention import SA, SAT
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
@@ -12,6 +12,7 @@ class SlotAE(pl.LightningModule):
     def __init__(
         self,
         image_encoder_name,
+        slot_attention_arch: str,
         slot_attention_args: dict,
         sample_strategy: list,
         feature_decoder: pl.LightningModule,
@@ -34,9 +35,11 @@ class SlotAE(pl.LightningModule):
             .requires_grad_(False)
         )
 
+        slot_arch = SA if slot_attention_arch == "sa" else SAT
+
         self.slot_attention = nn.ModuleList(
             [
-                SA(**slot_attention_args, sample_strategy=strat)
+                slot_arch(**slot_attention_args, sample_strategy=strat)
                 for strat in sample_strategy
             ]
         )
