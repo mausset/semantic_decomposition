@@ -44,7 +44,6 @@ class SA(pl.LightningModule):
                 depth=4,
                 ff_glu=True,
                 ff_swish=True,
-                cross_attend=True,
             )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
@@ -79,7 +78,9 @@ class SA(pl.LightningModule):
 
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
 
-        slots = self.encoder(sample, context=x)
+        x = torch.cat((x, sample), dim=1)
+
+        slots = self.encoder(x)[:, -n_slots:]
 
         return slots
 
