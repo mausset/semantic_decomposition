@@ -34,6 +34,12 @@ class SA(pl.LightningModule):
             self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
 
         elif sample_strategy == "gating":
+            self.encoder = Encoder(
+                dim=input_dim,
+                depth=2,
+                ff_glu=True,
+                ff_swish=True,
+            )
             self.gate = nn.Linear(input_dim, 1, bias=False)
 
         elif sample_strategy == "learned":
@@ -92,6 +98,7 @@ class SA(pl.LightningModule):
         return sample
 
     def sample_gating(self, x, n_slots):
+        x = self.encoder(x)
         r = self.gate(x)
 
         importance = r.softmax(dim=1)
