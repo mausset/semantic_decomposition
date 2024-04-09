@@ -46,6 +46,14 @@ class SA(pl.LightningModule):
                 ff_swish=True,
             )
 
+            self.dec = Encoder(
+                dim=slot_dim,
+                depth=4,
+                ff_glu=True,
+                ff_swish=True,
+                cross_attend=True,
+            )
+
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
@@ -75,12 +83,10 @@ class SA(pl.LightningModule):
 
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
         log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
-
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
 
-        x = torch.cat((x, sample), dim=1)
-
-        slots = self.encoder(x)[:, -n_slots:]
+        x = self.encoder(x)
+        slots = self.dec(sample, context=x)
 
         return slots
 
