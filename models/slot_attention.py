@@ -33,32 +33,18 @@ class SA(pl.LightningModule):
             nn.init.xavier_uniform_(init_log_sigma)
             self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
 
-        elif sample_strategy == "gating":
-            self.encoder = Encoder(
-                dim=input_dim,
-                depth=2,
-                ff_glu=True,
-                ff_swish=True,
-            )
-            self.gate = nn.Linear(input_dim, 1, bias=False)
-
         elif sample_strategy == "learned":
-            self.dist_encoder = Encoder(
+            self.init_mu = nn.Parameter(torch.randn(slot_dim))
+            init_log_sigma = torch.empty((1, 1, slot_dim))
+            nn.init.xavier_uniform_(init_log_sigma)
+            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
+            self.encoder = Encoder(
                 dim=slot_dim,
-                depth=2,
+                depth=4,
                 ff_glu=True,
                 ff_swish=True,
-            )
-
-            self.mu_projection = nn.Sequential(
-                nn.Linear(slot_dim, slot_dim),
-                nn.GELU(),
-                nn.Linear(slot_dim, slot_dim),
-            )
-            self.log_sigma_projection = nn.Sequential(
-                nn.Linear(slot_dim, slot_dim),
-                nn.GELU(),
-                nn.Linear(slot_dim, slot_dim),
+                cross_attend=True,
             )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
@@ -86,33 +72,18 @@ class SA(pl.LightningModule):
         return sample
 
     def sample_learned(self, x, n_slots):
-        x = self.dist_encoder(x).mean(dim=1)
-        mu = self.mu_projection(x)
-        log_sigma = self.log_sigma_projection(x)
+        b, n, _ = x.shape
 
-        mu = repeat(mu, "b d -> b n d", n=n_slots)
-        log_sigma = repeat(log_sigma, "b d -> b n d", n=n_slots)
+        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
+        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
 
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
 
-        return sample
+        slots = self.encoder(sample, context=x)
 
-    def sample_gating(self, x, n_slots):
-        encoded_x = self.encoder(x)
-        r = self.gate(encoded_x)
+        return slots
 
-        importance = r.softmax(dim=1)
-
-        idx = torch.topk(importance, n_slots, dim=1).indices
-
-        slots = torch.gather(x, 1, idx.expand(-1, -1, x.size(-1)))
-
-        # Squeeze due to strange mps bug
-        selected_r = torch.gather(r.squeeze(-1), 1, idx.squeeze(-1)).unsqueeze(-1)
-
-        return slots, selected_r
-
-    def step(self, slots, k, v, r=1, return_attn=False):
+    def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
@@ -128,7 +99,7 @@ class SA(pl.LightningModule):
         slots = self.gru(updates, slots)
         slots = rearrange(slots, "(b n) d -> b n d", n=n)
 
-        slots = slots + self.mlp(self.norm_pre_ff(slots)) * r
+        slots = slots + self.mlp(self.norm_pre_ff(slots))
 
         if return_attn:
             return slots, attn
@@ -139,12 +110,9 @@ class SA(pl.LightningModule):
         b, _, _ = x.shape
 
         x = self.norm_input(x)
-        r = 1
 
         if self.sample_strategy == "prior":
             init_slots = self.sample_prior(b, n_slots)
-        elif self.sample_strategy == "gating":
-            init_slots, r = self.sample_gating(x, n_slots)
         elif self.sample_strategy == "learned":
             init_slots = self.sample_learned(x, n_slots)
 
@@ -154,11 +122,11 @@ class SA(pl.LightningModule):
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots = self.step(slots, k, v, r=r)
+            slots = self.step(slots, k, v)
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots
-            slots, attn_map = self.step(slots, k, v, r=r, return_attn=True)
+            slots, attn_map = self.step(slots, k, v, return_attn=True)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
