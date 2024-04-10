@@ -329,11 +329,10 @@ class RSA(nn.Module):
 
         self.encoder_layers = nn.ModuleList(
             [
-                Encoder(
-                    dim=slot_dim,
-                    depth=1,
-                    ff_glu=True,
-                    ff_swish=True,
+                nn.Sequential(
+                    nn.Linear(slot_dim, slot_dim * 4),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(slot_dim * 4, slot_dim),
                 )
                 for _ in range(depth)
             ]
