@@ -14,7 +14,7 @@ class SlotAE(pl.LightningModule):
         image_encoder_name,
         slot_attention_arch: str,
         slot_attention_args: dict,
-        sample_strategy: list,
+        detach_slots: bool,
         feature_decoder: pl.LightningModule,
         dim: int,
         learning_rate: float,
@@ -60,6 +60,7 @@ class SlotAE(pl.LightningModule):
 
         self.dim = dim
         self.learning_rate = learning_rate
+        self.detach_slots = detach_slots
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
@@ -88,7 +89,8 @@ class SlotAE(pl.LightningModule):
             dec_slots = project_slots(slots)
             decoded_features, _ = self.feature_decoder(dec_slots)
             losses.append(self.loss_fn(decoded_features, features))
-            slots = slots.detach()
+            if self.detach_slots:
+                slots = slots.detach()
 
         return losses, attn_maps
 
