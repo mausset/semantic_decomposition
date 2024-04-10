@@ -383,7 +383,7 @@ class RSA(nn.Module):
 
         for layer in self.encoder_layers:
             slots, attn_map = self.ica(slots, k, v)
-            slots = layer(slots)
+            slots = layer(slots) + slots
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
