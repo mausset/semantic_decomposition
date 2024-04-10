@@ -339,7 +339,6 @@ class RSA(nn.Module):
 
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
-        self.norm_ica = nn.LayerNorm(slot_dim)
 
     def sample(self, x, n_slots):
         b, _, _ = x.shape
@@ -361,7 +360,7 @@ class RSA(nn.Module):
         attn = dots.softmax(dim=1) + self.eps
         attn = attn / attn.sum(dim=-1, keepdim=True)
         updates = torch.einsum("bjd,bij->bid", v, attn)
-        slots = self.norm_ica(slots + updates)
+        slots = slots + updates
 
         return slots, attn
 
