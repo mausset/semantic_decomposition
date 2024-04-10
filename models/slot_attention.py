@@ -325,6 +325,8 @@ class RSA(nn.Module):
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
 
+        self.gru = nn.GRUCell(slot_dim, slot_dim)
+
         self.encoder_layers = nn.ModuleList(
             [
                 Encoder(
@@ -339,6 +341,7 @@ class RSA(nn.Module):
 
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
+        self.norm_ica = nn.LayerNorm(slot_dim)
 
     def sample(self, x, n_slots):
         b, _, _ = x.shape
@@ -354,13 +357,19 @@ class RSA(nn.Module):
         return sample
 
     def ica(self, slots, k, v):
+        _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
         attn = dots.softmax(dim=1) + self.eps
         attn = attn / attn.sum(dim=-1, keepdim=True)
         updates = torch.einsum("bjd,bij->bid", v, attn)
-        slots = slots + updates
+
+        slots = rearrange(slots, "b n d -> (b n) d")
+        updates = rearrange(updates, "b n d -> (b n) d")
+        slots = self.gru(updates, slots)
+        slots = rearrange(slots, "(b n) d -> b n d", n=n)
+        slots = self.norm_ica(slots)
 
         return slots, attn
 
