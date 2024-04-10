@@ -1,9 +1,10 @@
 import lightning as pl
 import torch
-from torch import nn
 from einops import rearrange, repeat
-
+from torch import nn
 from x_transformers import Encoder
+
+from models.components import SwiGLUFFN
 
 
 def build_slot_attention(arch: str, args):
@@ -327,16 +328,7 @@ class RSA(nn.Module):
 
         self.gru = nn.GRUCell(slot_dim, slot_dim)
 
-        self.encoder_layers = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(slot_dim, slot_dim * 4),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(slot_dim * 4, slot_dim),
-                )
-                for _ in range(depth)
-            ]
-        )
+        self.encoder_layers = nn.ModuleList([SwiGLUFFN(slot_dim) for _ in range(depth)])
 
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
