@@ -6,6 +6,18 @@ from einops import rearrange, repeat
 from x_transformers import Encoder
 
 
+def build_slot_attention(arch: str, args):
+
+    if arch == "sa":
+        return SA(**args)
+    elif arch == "sat":
+        return SAT(**args)
+    elif arch == "rsa":
+        return RSA(**args)
+    else:
+        raise ValueError(f"Unknown slot attention architecture: {arch}")
+
+
 class SA(pl.LightningModule):
 
     def __init__(
@@ -265,6 +277,106 @@ class SAT(nn.Module):
             slots = slots.detach() - init_slots.detach() + init_slots
 
         slots, attn_map = self.step(slots, k, v, return_attn=True)
+
+        attn_map = rearrange(attn_map, "b n hw -> b hw n")
+
+        return slots, attn_map
+
+
+class RSA(nn.Module):
+
+    def __init__(
+        self,
+        input_dim,
+        slot_dim,
+        depth=4,
+        sample_strategy="prior",
+        eps=1e-8,
+    ):
+        super().__init__()
+        self.in_dim = input_dim
+        self.slot_dim = slot_dim
+        self.sample_strategy = sample_strategy
+        self.eps = eps
+
+        self.scale = input_dim**-0.5
+
+        if sample_strategy == "prior":
+            self.init_mu = nn.Parameter(torch.randn(slot_dim))
+            init_log_sigma = torch.empty((1, 1, slot_dim))
+            nn.init.xavier_uniform_(init_log_sigma)
+            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
+        elif sample_strategy == "learned":
+            self.init_mu = nn.Parameter(torch.randn(slot_dim))
+            init_log_sigma = torch.empty((1, 1, slot_dim))
+            nn.init.xavier_uniform_(init_log_sigma)
+            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
+            self.s_dec = Encoder(
+                dim=slot_dim,
+                depth=4,
+                ff_glu=True,
+                ff_swish=True,
+                cross_attend=True,
+            )
+
+        self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
+        self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
+        self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
+
+        self.encoder_layers = nn.ModuleList(
+            [
+                Encoder(
+                    dim=slot_dim,
+                    depth=1,
+                    ff_glu=True,
+                    ff_swish=True,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+        self.norm_input = nn.LayerNorm(input_dim)
+        self.norm_slots = nn.LayerNorm(slot_dim)
+        self.norm_ica = nn.LayerNorm(slot_dim)
+
+    def sample(self, x, n_slots):
+        b, _, _ = x.shape
+
+        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
+        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
+
+        sample = mu + log_sigma.exp() * torch.randn_like(mu)
+
+        if self.sample_strategy == "learned":
+            sample = self.s_dec(sample, context=x)
+
+        return sample
+
+    def ica(self, slots, k, v):
+
+        q = self.inv_cross_q(self.norm_slots(slots))
+        dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+        attn = dots.softmax(dim=1) + self.eps
+        attn = attn / attn.sum(dim=-1, keepdim=True)
+        updates = torch.einsum("bjd,bij->bid", v, attn)
+        slots = self.norm_ica(slots + updates)
+
+        return slots, attn
+
+    def forward(self, x, n_slots=8):
+
+        x = self.norm_input(x)
+
+        slots = self.sample(x, n_slots)
+
+        k = self.inv_cross_k(x)
+        v = self.inv_cross_v(x)
+
+        for layer in self.encoder_layers:
+            slots, attn_map = self.ica(slots, k, v)
+            slots = layer(slots)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 

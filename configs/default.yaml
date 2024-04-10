@@ -10,12 +10,13 @@ model:
     loss_fn: 
       class_path: torch.nn.MSELoss
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
-    slot_attention_arch: sat
+    slot_attention_arch: rsa
     slot_attention_args:
       input_dim: ${..dim}
       slot_dim: ${..dim}
-      n_iters: 5
-      implicit: True
+      depth: 4
+      # n_iters: 5
+      # implicit: True
     sample_strategy:
       - prior
       - prior
