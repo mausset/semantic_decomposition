@@ -149,6 +149,7 @@ class SAT(nn.Module):
         slot_dim,
         n_iters=3,
         implicit=False,
+        depth=4,
         sample_strategy="prior",
         eps=1e-8,
     ):
@@ -195,7 +196,7 @@ class SAT(nn.Module):
 
         self.t_encoder = Encoder(
             dim=input_dim,
-            depth=1,
+            depth=depth,
             ff_glu=True,
             ff_swish=True,
         )
