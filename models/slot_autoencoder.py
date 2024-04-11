@@ -23,7 +23,9 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots: int | list[int, int] = [16, 8],
+        multi_scale_decoder: bool = False,
         single_decoder: bool = False,
+        project_slots: bool = True,
     ):
         super().__init__()
 
@@ -47,15 +49,20 @@ class SlotAE(pl.LightningModule):
 
         self.project_slots = nn.ModuleList(
             [
-                nn.Sequential(
-                    # nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
-                    SwiGLUFFN(dim),
-                    nn.LayerNorm(dim),
+                (
+                    nn.Sequential(
+                        # nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
+                        SwiGLUFFN(dim),
+                        nn.LayerNorm(dim),
+                    )
+                    if project_slots
+                    else nn.Identity()
                 )
                 for _ in n_slots
             ]
         )
 
+        single_decoder = multi_scale_decoder or single_decoder
         self.feature_decoder = nn.ModuleList(
             [
                 TransformerDecoder(**feature_decoder_args)
@@ -74,6 +81,7 @@ class SlotAE(pl.LightningModule):
         self.loss_fn = loss_fn
         self.n_slots = n_slots
         self.single_decoder = single_decoder
+        self.multi_scale_decoder = multi_scale_decoder
 
     # Shorthand
     def forward_features(self, x):
@@ -86,6 +94,7 @@ class SlotAE(pl.LightningModule):
 
         losses = []
         attn_maps = []
+        slots_list = []
         for i, (n_slots, slot_attention, project_slots) in enumerate(
             zip(self.n_slots, self.slot_attention, self.project_slots)
         ):
@@ -97,6 +106,10 @@ class SlotAE(pl.LightningModule):
 
             attn_maps.append((attn_map,))
 
+            if self.multi_scale_decoder:
+                slots_list.append(slots)
+                continue
+
             dec_slots = project_slots(slots)
             if self.single_decoder:
                 decoded_features, _ = self.feature_decoder[0](dec_slots)
@@ -107,6 +120,17 @@ class SlotAE(pl.LightningModule):
 
             if self.detach_slots:
                 slots = slots.detach()
+
+        if self.multi_scale_decoder:
+            projected_slots = [
+                project_slots(slots)
+                for project_slots, slots in zip(self.project_slots, slots_list)
+            ]
+            dec_slots = torch.cat(projected_slots, dim=1)
+
+            decoded_features, _ = self.feature_decoder[0](dec_slots)
+
+            losses.append(self.loss_fn(decoded_features, features))
 
         return losses, attn_maps
 

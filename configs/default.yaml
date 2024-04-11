@@ -7,9 +7,13 @@ model:
     learning_rate: 2e-4
     resolution: [224, 224]
     n_slots: [8, 4]
+    detach_slots: False
+    single_decoder: True
+    multi_scale_decoder: True
+    image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
+    project_slots: False
     loss_fn: 
       class_path: torch.nn.MSELoss
-    image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
     slot_attention_arch: sat
     slot_attention_args:
       input_dim: ${..dim}
@@ -19,8 +23,6 @@ model:
       implicit: True
       gru: False
       # ff_swiglu: True
-    detach_slots: False
-    single_decoder: False
     feature_decoder_args:
       dim: ${..dim}
       depth: 4
