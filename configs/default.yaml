@@ -10,21 +10,21 @@ model:
     loss_fn: 
       class_path: torch.nn.MSELoss
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
-    slot_attention_arch: sa
+    slot_attention_arch: sat
     slot_attention_args:
       input_dim: ${..dim}
       slot_dim: ${..dim}
-      # depth: 4
+      depth: 1
       n_iters: 5
       implicit: True
-      ff_swiglu: True
-    detach_slots: True
-    feature_decoder:
-      class_path: models.decoder.TransformerDecoder
-      init_args:
-        dim: ${...dim}
-        depth: 4
-        resolution: [16, 16]
+      gru: False
+      # ff_swiglu: True
+    detach_slots: False
+    single_decoder: False
+    feature_decoder_args:
+      dim: ${..dim}
+      depth: 4
+      resolution: [16, 16]
 
 data:
   class_path: dataset.coco.COCO

@@ -1,6 +1,7 @@
 import lightning as pl
 import timm
 import torch
+from models.decoder import TransformerDecoder
 from models.slot_attention import build_slot_attention
 from torch import nn
 from torch.optim import AdamW
@@ -15,12 +16,13 @@ class SlotAE(pl.LightningModule):
         slot_attention_arch: str,
         slot_attention_args: dict,
         detach_slots: bool,
-        feature_decoder: pl.LightningModule,
+        feature_decoder_args: dict,
         dim: int,
         learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
         n_slots: int | list[int, int] = [16, 8],
+        single_decoder: bool = False,
     ):
         super().__init__()
 
@@ -52,7 +54,12 @@ class SlotAE(pl.LightningModule):
             ]
         )
 
-        self.feature_decoder = feature_decoder
+        self.feature_decoder = nn.ModuleList(
+            [
+                TransformerDecoder(**feature_decoder_args)
+                for _ in range(1 if single_decoder else len(n_slots))
+            ]
+        )
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
 
@@ -64,6 +71,7 @@ class SlotAE(pl.LightningModule):
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
+        self.single_decoder = single_decoder
 
     # Shorthand
     def forward_features(self, x):
@@ -76,9 +84,10 @@ class SlotAE(pl.LightningModule):
 
         losses = []
         attn_maps = []
-        for n_slots, slot_attention, project_slots in zip(
-            self.n_slots, self.slot_attention, self.project_slots
+        for i, (n_slots, slot_attention, project_slots) in enumerate(
+            zip(self.n_slots, self.slot_attention, self.project_slots)
         ):
+
             slots, attn_map = slot_attention(slots, n_slots)
 
             if attn_maps:
@@ -87,8 +96,13 @@ class SlotAE(pl.LightningModule):
             attn_maps.append((attn_map,))
 
             dec_slots = project_slots(slots)
-            decoded_features, _ = self.feature_decoder(dec_slots)
+            if self.single_decoder:
+                decoded_features, _ = self.feature_decoder[0](dec_slots)
+            else:
+                decoded_features, _ = self.feature_decoder[i](dec_slots)
+
             losses.append(self.loss_fn(decoded_features, features))
+
             if self.detach_slots:
                 slots = slots.detach()
 
