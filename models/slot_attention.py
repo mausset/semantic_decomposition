@@ -28,6 +28,7 @@ class SA(pl.LightningModule):
         n_iters=3,
         implicit=False,
         sample_strategy="prior",
+        ff_swiglu=False,
         eps=1e-8,
     ):
         super().__init__()
@@ -40,25 +41,12 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        if sample_strategy == "prior":
-            self.init_mu = nn.Parameter(torch.randn(slot_dim))
-            init_log_sigma = torch.empty((1, 1, slot_dim))
-            nn.init.xavier_uniform_(init_log_sigma)
-            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+        self.init_mu = nn.Parameter(torch.randn(slot_dim))
+        init_log_sigma = torch.empty((1, 1, slot_dim))
+        nn.init.xavier_uniform_(init_log_sigma)
+        self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
 
-        elif sample_strategy == "learned":
-            self.init_mu = nn.Parameter(torch.randn(slot_dim))
-            init_log_sigma = torch.empty((1, 1, slot_dim))
-            nn.init.xavier_uniform_(init_log_sigma)
-            self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
-
-            self.encoder = Encoder(
-                dim=slot_dim,
-                depth=4,
-                ff_glu=True,
-                ff_swish=True,
-            )
-
+        if sample_strategy == "learned":
             self.dec = Encoder(
                 dim=slot_dim,
                 depth=4,
@@ -73,35 +61,31 @@ class SA(pl.LightningModule):
 
         self.gru = nn.GRUCell(slot_dim, slot_dim)
 
-        self.mlp = nn.Sequential(
-            nn.Linear(slot_dim, slot_dim * 4),
-            nn.ReLU(inplace=True),
-            nn.Linear(slot_dim * 4, slot_dim),
-        )
+        if ff_swiglu:
+            self.mlp = SwiGLUFFN(slot_dim)
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(slot_dim, slot_dim * 4),
+                nn.ReLU(inplace=True),
+                nn.Linear(slot_dim * 4, slot_dim),
+            )
 
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
-    def sample_prior(self, b, n_slots):
+    def sample(self, x, n_slots):
+        b, _, _ = x.shape
+
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
         log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
 
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
+
+        if self.sample_strategy == "learned":
+            sample = self.dec(sample, context=x)
 
         return sample
-
-    def sample_learned(self, x, n_slots):
-        b, n, _ = x.shape
-
-        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
-        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
-        sample = mu + log_sigma.exp() * torch.randn_like(mu)
-
-        x = self.encoder(x)
-        slots = self.dec(sample, context=x)
-
-        return slots
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
@@ -131,11 +115,7 @@ class SA(pl.LightningModule):
 
         x = self.norm_input(x)
 
-        if self.sample_strategy == "prior":
-            init_slots = self.sample_prior(b, n_slots)
-        elif self.sample_strategy == "learned":
-            init_slots = self.sample_learned(x, n_slots)
-
+        init_slots = self.sample(x, n_slots)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
