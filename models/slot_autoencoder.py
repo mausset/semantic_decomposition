@@ -3,6 +3,7 @@ import timm
 import torch
 from models.decoder import TransformerDecoder
 from models.slot_attention import build_slot_attention
+from models.components import SwiGLUFFN
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
@@ -47,7 +48,8 @@ class SlotAE(pl.LightningModule):
         self.project_slots = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
+                    # nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
+                    SwiGLUFFN(dim),
                     nn.LayerNorm(dim),
                 )
                 for _ in n_slots
