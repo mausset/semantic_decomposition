@@ -16,16 +16,15 @@ class SlotAE(pl.LightningModule):
         image_encoder_name,
         slot_attention_arch: str,
         slot_attention_args: dict,
-        detach_slots: bool,
         feature_decoder_args: dict,
         dim: int,
         learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
-        n_slots: int | list[int, int] = [16, 8],
-        multi_scale_decoder: bool = False,
-        single_decoder: bool = False,
+        n_slots=[16, 8],
+        single_decoder: bool = True,
         project_slots: bool = True,
+        random_decoding: bool = True,
     ):
         super().__init__()
 
@@ -47,28 +46,12 @@ class SlotAE(pl.LightningModule):
             ]
         )
 
-        self.project_slots = nn.ModuleList(
-            [
-                (
-                    nn.Sequential(
-                        # nn.Linear(slot_attention_args["slot_dim"], dim, bias=False),
-                        SwiGLUFFN(dim),
-                        nn.LayerNorm(dim),
-                    )
-                    if project_slots
-                    else nn.Identity()
-                )
-                for _ in n_slots
-            ]
+        self.project_slots = nn.Sequential(
+            SwiGLUFFN(dim) if project_slots else nn.Identity(),
+            nn.LayerNorm(dim),
         )
 
-        single_decoder = multi_scale_decoder or single_decoder
-        self.feature_decoder = nn.ModuleList(
-            [
-                TransformerDecoder(**feature_decoder_args)
-                for _ in range(1 if single_decoder else len(n_slots))
-            ]
-        )
+        self.feature_decoder = TransformerDecoder(**feature_decoder_args)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
 
@@ -76,12 +59,11 @@ class SlotAE(pl.LightningModule):
 
         self.dim = dim
         self.learning_rate = learning_rate
-        self.detach_slots = detach_slots
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
         self.single_decoder = single_decoder
-        self.multi_scale_decoder = multi_scale_decoder
+        self.random_decoding = random_decoding
 
     # Shorthand
     def forward_features(self, x):
@@ -95,42 +77,30 @@ class SlotAE(pl.LightningModule):
         losses = []
         attn_maps = []
         slots_list = []
-        for i, (n_slots, slot_attention, project_slots) in enumerate(
-            zip(self.n_slots, self.slot_attention, self.project_slots)
-        ):
+        for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
 
-            slots, attn_map = slot_attention(slots, n_slots)
-
-            if attn_maps:
-                attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
-
-            attn_maps.append((attn_map,))
-
-            if self.multi_scale_decoder:
-                slots_list.append(slots)
-                continue
-
-            dec_slots = project_slots(slots)
-            if self.single_decoder:
-                decoded_features, _ = self.feature_decoder[0](dec_slots)
+            # Check if n_slots is a list
+            if isinstance(n_slots, list):
+                for n_slot in n_slots:
+                    slots, attn_map = slot_attention(slots, n_slot)
+                    if attn_maps:
+                        attn_map = attn_maps[-1][0] @ attn_map
+                    attn_maps.append((attn_map,))
+                    slots_list.append(slots)
             else:
-                decoded_features, _ = self.feature_decoder[i](dec_slots)
+                slots, attn_map = slot_attention(slots, n_slots)
+                if attn_maps:
+                    attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
+                attn_maps.append((attn_map,))
+                slots_list.append(slots)
 
-            losses.append(self.loss_fn(decoded_features, features))
+        if self.random_decoding:
+            sample = torch.randint(0, len(slots_list), (1,)).item()
+            slots = slots_list[sample]
+            dec_slots = self.project_slots(slots)
+            decoded_features, _ = self.feature_decoder(dec_slots)
 
-            if self.detach_slots:
-                slots = slots.detach()
-
-        if self.multi_scale_decoder:
-            projected_slots = [
-                project_slots(slots)
-                for project_slots, slots in zip(self.project_slots, slots_list)
-            ]
-            dec_slots = torch.cat(projected_slots, dim=1)
-
-            decoded_features, _ = self.feature_decoder[0](dec_slots)
-
-            losses.append(self.loss_fn(decoded_features, features))
+        losses.append(self.loss_fn(decoded_features, features))
 
         return losses, attn_maps
 
