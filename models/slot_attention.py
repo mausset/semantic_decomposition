@@ -143,6 +143,7 @@ class SAT(nn.Module):
         n_iters=3,
         implicit=False,
         depth=1,
+        gru=False,
         sample_strategy="prior",
         eps=1e-8,
     ):
@@ -151,6 +152,7 @@ class SAT(nn.Module):
         self.slot_dim = slot_dim
         self.n_iters = n_iters
         self.implicit = implicit
+        self.gru = gru
         self.sample_strategy = sample_strategy
         self.eps = eps
 
@@ -172,6 +174,9 @@ class SAT(nn.Module):
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=False)
+
+        if gru:
+            self.gru = nn.GRUCell(slot_dim, slot_dim)
 
         self.t_encoder = Encoder(
             dim=input_dim,
@@ -209,7 +214,16 @@ class SAT(nn.Module):
 
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
-        slots = self.norm_ica(slots + updates)
+        if self.gru:
+            updates = torch.einsum("bjd,bij->bid", v, attn)
+            slots = rearrange(slots, "b n d -> (b n) d")
+            updates = rearrange(updates, "b n d -> (b n) d")
+            slots = self.gru(updates, slots)
+            slots = rearrange(slots, "(b n) d -> b n d", n=n)
+        else:
+            slots = slots + updates
+
+        slots = self.norm_ica(slots)
 
         slots = self.t_encoder(slots)
 
