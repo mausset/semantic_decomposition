@@ -74,9 +74,9 @@ class SlotAE(pl.LightningModule):
         features = self.forward_features(x)
         slots = features
 
-        losses = []
+        losses = {}
         attn_maps = []
-        slots_list = []
+        slots_dict = {}
         for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
 
             # Check if n_slots is a list
@@ -86,31 +86,35 @@ class SlotAE(pl.LightningModule):
                     if attn_maps:
                         attn_map = attn_maps[-1][0] @ attn_map
                     attn_maps.append((attn_map,))
-                    slots_list.append(slots)
+                    slots_dict[n_slot] = slots
             else:
                 slots, attn_map = slot_attention(slots, n_slots)
                 if attn_maps:
                     attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                 attn_maps.append((attn_map,))
-                slots_list.append(slots)
+                slots_dict[n_slots] = slots
 
         if self.random_decoding:
-            sample = torch.randint(0, len(slots_list), (1,)).item()
-            slots = slots_list[sample]
+            # Sample from
+            slot_keys = list(slots_dict.keys())
+            sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
+            slots = slots_dict[sampled_key]
             dec_slots = self.project_slots(slots)
             decoded_features, _ = self.feature_decoder(dec_slots)
 
-        losses.append(self.loss_fn(decoded_features, features))
+            losses[sampled_key] = self.loss_fn(decoded_features, features)
+        else:
+            raise NotImplementedError
 
         return losses, attn_maps
 
     def training_step(self, x):
         losses, _ = self.common_step(x)
 
-        for loss, n_slots in zip(losses, self.n_slots):
-            self.log(f"train/loss_{n_slots}", loss, sync_dist=True)
+        for k, v in losses.items():
+            self.log(f"train/loss_{k}", v, sync_dist=True)
 
-        loss = torch.stack(losses).mean()
+        loss = torch.stack(list(losses.values())).mean()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
 
         return loss
@@ -118,10 +122,10 @@ class SlotAE(pl.LightningModule):
     def validation_step(self, x):
         losses, attn_maps = self.common_step(x)
 
-        for loss, n_slots in zip(losses, self.n_slots):
-            self.log(f"val/loss_{n_slots}", loss, sync_dist=True)
+        for k, v in losses.items():
+            self.log(f"val/loss_{k}", v, sync_dist=True)
 
-        loss = torch.stack(losses).mean()
+        loss = torch.stack(list(losses.values())).mean()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
         self.logger.log_image(

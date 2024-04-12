@@ -19,6 +19,7 @@ def plot_attention(
     patch_size=14,
     palette="muted",
     alpha=0.4,
+    include_original=False,
 ):
     _, n = attn_maps[0][0].shape
 
@@ -49,7 +50,10 @@ def plot_attention(
         segmented_img = img * alpha + segment * (1 - alpha)
         cat_imgs.append(segmented_img)
 
-    cat_img = torch.cat(cat_imgs, dim=2)
+    if include_original:
+        cat_img = torch.cat(cat_imgs, dim=2)
+    else:
+        cat_img = torch.cat(cat_imgs[1:], dim=2)
 
     return cat_img
 
@@ -67,4 +71,16 @@ def plot_attention_hierarchical(
     for attn_t in attn_maps:
         collect.append(plot_attention(img, attn_t, res, patch_size, palette, alpha))
 
-    return torch.cat(collect, dim=1)
+    w = int(np.ceil(np.sqrt(len(collect))))
+    h = int(np.ceil(len(collect) / w))
+
+    extra = int(w * h - len(collect))
+
+    for _ in range(extra):
+        collect.append(torch.zeros_like(collect[0]))
+
+    rows = []
+    for i in range(h):
+        rows.append(torch.cat(collect[i * w : (i + 1) * w], dim=2))
+
+    return torch.cat(rows, dim=1)
