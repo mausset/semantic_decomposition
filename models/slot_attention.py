@@ -1,7 +1,7 @@
 import lightning as pl
 import torch
 from einops import rearrange, repeat
-from torch import cross, nn
+from torch import nn
 from x_transformers import Encoder
 
 from models.components import SwiGLUFFN

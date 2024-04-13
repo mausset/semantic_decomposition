@@ -70,7 +70,7 @@ class TransformerDecoder(pl.LightningModule):
             ff_swish=True,
         )
 
-    def forward(self, x):
+    def forward(self, x, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -85,7 +85,9 @@ class TransformerDecoder(pl.LightningModule):
 
         scaffold = self.pos_enc(grid)
 
-        result, hiddens = self.transformer(scaffold, context=x, return_hiddens=True)
+        result, hiddens = self.transformer(
+            scaffold, context=x, context_mask=context_mask, return_hiddens=True
+        )
 
         # Last cross-attention map, mean across heads
         attn_map = hiddens.attn_intermediates[-1].post_softmax_attn.mean(dim=1)

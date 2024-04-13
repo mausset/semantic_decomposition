@@ -7,6 +7,7 @@ from models.components import SwiGLUFFN
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
+from einops import repeat
 
 
 class SlotAE(pl.LightningModule):
@@ -24,7 +25,7 @@ class SlotAE(pl.LightningModule):
         n_slots=[16, 8],
         single_decoder: bool = True,
         project_slots: bool = True,
-        random_decoding: bool = True,
+        decode_strategy: str = "random",
     ):
         super().__init__()
 
@@ -63,7 +64,7 @@ class SlotAE(pl.LightningModule):
         self.loss_fn = loss_fn
         self.n_slots = n_slots
         self.single_decoder = single_decoder
-        self.random_decoding = random_decoding
+        self.decode_strategy = decode_strategy
 
     # Shorthand
     def forward_features(self, x):
@@ -74,7 +75,6 @@ class SlotAE(pl.LightningModule):
         features = self.forward_features(x)
         slots = features
 
-        losses = {}
         attn_maps = []
         slots_dict = {}
         first = True
@@ -89,7 +89,7 @@ class SlotAE(pl.LightningModule):
                     if attn_maps:
                         attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                     attn_maps.append((attn_map,))
-                    slots_dict[n_slot] = slots
+                    slots_dict[n_slot] = self.project_slots(slots)
 
                     first = False
             else:
@@ -97,18 +97,69 @@ class SlotAE(pl.LightningModule):
                 if attn_maps:
                     attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                 attn_maps.append((attn_map,))
-                slots_dict[n_slots] = slots
+                slots_dict[n_slots] = self.project_slots(slots)
 
                 first = False
 
-        if self.random_decoding:
+        losses = {}
+        if self.decode_strategy == "random":
             slot_keys = list(slots_dict.keys())
             sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
             slots = slots_dict[sampled_key]
-            dec_slots = self.project_slots(slots)
-            decoded_features, _ = self.feature_decoder(dec_slots)
+            decoded_features, _ = self.feature_decoder(slots)
 
             losses[sampled_key] = self.loss_fn(decoded_features, features)
+        elif self.decode_strategy == "all":
+            slot_keys = list(slots_dict.keys())
+            slot_values = list(slots_dict.values())
+
+            mask = [
+                torch.ones(slot.shape[:2], device=slot.device) for slot in slot_values
+            ]
+
+            max_slots = max(slot_keys)
+            padded_slots = []
+            padded_mask = []
+            for i, slot in enumerate(slot_values):
+                padding = max_slots - slot.shape[1]
+                padded_slots.append(
+                    torch.cat(
+                        [
+                            slot,
+                            torch.zeros(
+                                slot.shape[0],
+                                padding,
+                                slot.shape[2],
+                                device=slot.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+                )
+                padded_mask.append(
+                    torch.cat(
+                        [
+                            mask[i],
+                            torch.zeros(mask[i].shape[0], padding, device=slot.device),
+                        ],
+                        dim=1,
+                    )
+                )
+
+            padded_slots = torch.cat(padded_slots, dim=0)
+            padded_mask = torch.cat(padded_mask, dim=0).bool()
+
+            decoded_features, _ = self.feature_decoder(
+                padded_slots, context_mask=padded_mask
+            )
+
+            chunked_decoded_features = torch.chunk(
+                decoded_features, len(slot_keys), dim=0
+            )
+
+            for slot_key, chunk in zip(slot_keys, chunked_decoded_features):
+                losses[slot_key] = self.loss_fn(chunk, features)
+
         else:
             raise NotImplementedError
 

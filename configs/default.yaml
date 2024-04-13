@@ -6,12 +6,10 @@ model:
     dim: 384 
     learning_rate: 2e-4
     resolution: [224, 224]
-    n_slots: [8, 4]
-    detach_slots: False
-    single_decoder: True
-    multi_scale_decoder: True
+    n_slots: [[9, 8], [7, 6, 5, 4, 3]]
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
-    project_slots: False
+    project_slots: True
+    decode_strategy: random
     loss_fn: 
       class_path: torch.nn.MSELoss
     slot_attention_arch: sat
@@ -21,8 +19,7 @@ model:
       depth: 1
       n_iters: 5
       implicit: True
-      gru: False
-      # ff_swiglu: True
+      sample_strategy: learned
     feature_decoder_args:
       dim: ${..dim}
       depth: 4
@@ -33,7 +30,7 @@ data:
   init_args:
     data_dir: ./data/coco/coco2017
     num_workers: 7
-    batch_size: 32
+    batch_size: 2
     resolution: 224
 
 trainer:
