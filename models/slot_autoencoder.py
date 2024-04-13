@@ -77,25 +77,31 @@ class SlotAE(pl.LightningModule):
         losses = {}
         attn_maps = []
         slots_dict = {}
+        first = True
         for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
 
             # Check if n_slots is a list
             if isinstance(n_slots, list):
                 for n_slot in n_slots:
-                    slots, attn_map = slot_attention(slots, n_slot)
+                    slots, attn_map = slot_attention(
+                        slots, n_slot, cross_attn=not first
+                    )
                     if attn_maps:
-                        attn_map = attn_maps[-1][0] @ attn_map
+                        attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                     attn_maps.append((attn_map,))
                     slots_dict[n_slot] = slots
+
+                    first = False
             else:
-                slots, attn_map = slot_attention(slots, n_slots)
+                slots, attn_map = slot_attention(slots, n_slots, cross_attn=not first)
                 if attn_maps:
                     attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                 attn_maps.append((attn_map,))
                 slots_dict[n_slots] = slots
 
+                first = False
+
         if self.random_decoding:
-            # Sample from
             slot_keys = list(slots_dict.keys())
             sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
             slots = slots_dict[sampled_key]
