@@ -4,12 +4,13 @@ model:
   class_path: models.slot_autoencoder.SlotAE
   init_args:
     dim: 384 
-    learning_rate: 2e-4
+    learning_rate: 5e-4
+    warmup_steps: 500
     resolution: [224, 224]
     n_slots: [[9, 8], [7, 6, 5, 4, 3]]
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
     project_slots: True
-    decode_strategy: random
+    decode_strategy: all
     loss_fn: 
       class_path: torch.nn.MSELoss
     slot_attention_arch: sat
@@ -34,7 +35,7 @@ data:
     resolution: 224
 
 trainer:
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 16
   logger: 
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:

@@ -23,6 +23,7 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
+        warmup_steps: int = 0,
         single_decoder: bool = True,
         project_slots: bool = True,
         decode_strategy: str = "random",
@@ -60,6 +61,7 @@ class SlotAE(pl.LightningModule):
 
         self.dim = dim
         self.learning_rate = learning_rate
+        self.warmup_steps = warmup_steps
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
@@ -201,4 +203,6 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return AdamWScheduleFree(self.parameters(), lr=self.learning_rate)
+        return AdamWScheduleFree(
+            self.parameters(), lr=self.learning_rate, warmup_steps=self.warmup_steps
+        )
