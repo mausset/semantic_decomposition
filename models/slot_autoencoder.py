@@ -7,7 +7,7 @@ from models.components import SwiGLUFFN
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
-from einops import repeat
+from schedulefree import AdamWScheduleFree
 
 
 class SlotAE(pl.LightningModule):
@@ -166,6 +166,7 @@ class SlotAE(pl.LightningModule):
         return losses, attn_maps
 
     def training_step(self, x):
+        self.optimizers().train()
         losses, _ = self.common_step(x)
 
         for k, v in losses.items():
@@ -177,6 +178,7 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
+        self.optimizers().eval()
         losses, attn_maps = self.common_step(x)
 
         for k, v in losses.items():
@@ -199,4 +201,4 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return AdamW(self.parameters(), lr=self.learning_rate)
+        return AdamWScheduleFree(self.parameters(), lr=self.learning_rate)
