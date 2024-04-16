@@ -27,6 +27,7 @@ class SlotAE(pl.LightningModule):
         single_decoder: bool = True,
         project_slots: bool = True,
         decode_strategy: str = "random",
+        hierarchical: bool = True,
     ):
         super().__init__()
 
@@ -67,6 +68,7 @@ class SlotAE(pl.LightningModule):
         self.n_slots = n_slots
         self.single_decoder = single_decoder
         self.decode_strategy = decode_strategy
+        self.hierarchical = hierarchical
 
     # Shorthand
     def forward_features(self, x):
@@ -94,6 +96,9 @@ class SlotAE(pl.LightningModule):
                     slots_dict[n_slot] = self.project_slots(slots)
 
                     first = False
+
+                    if not self.hierarchical:
+                        slots = features
             else:
                 slots, attn_map = slot_attention(slots, n_slots, cross_attn=not first)
                 if attn_maps:
@@ -102,6 +107,9 @@ class SlotAE(pl.LightningModule):
                 slots_dict[n_slots] = self.project_slots(slots)
 
                 first = False
+
+                if not self.hierarchical:
+                    slots = features
 
         losses = {}
         if self.decode_strategy == "random":
