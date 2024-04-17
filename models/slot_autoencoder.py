@@ -62,6 +62,10 @@ class SlotAE(pl.LightningModule):
 
         self.dim = dim
         self.resolution = resolution
+        self.feature_resolution = (
+            self.resolution[0] // self.patch_size,
+            self.resolution[1] // self.patch_size,
+        )
         self.loss_fn = loss_fn
         self.n_slots = n_slots
         self.single_decoder = single_decoder
@@ -116,7 +120,7 @@ class SlotAE(pl.LightningModule):
             slot_keys = list(slots_dict.keys())
             sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
             slots = slots_dict[sampled_key]
-            decoded_features, _ = self.feature_decoder(slots)
+            decoded_features, _ = self.feature_decoder(slots, self.feature_resolution)
 
             losses[sampled_key] = self.loss_fn(decoded_features, features)
         elif self.decode_strategy == "all":
@@ -160,7 +164,7 @@ class SlotAE(pl.LightningModule):
             padded_mask = torch.cat(padded_mask, dim=0).bool()
 
             decoded_features, _ = self.feature_decoder(
-                padded_slots, context_mask=padded_mask
+                padded_slots, self.feature_resolution, context_mask=padded_mask
             )
 
             chunked_decoded_features = torch.chunk(
@@ -176,7 +180,8 @@ class SlotAE(pl.LightningModule):
         return losses, attn_maps
 
     def training_step(self, x):
-        self.optimizers().train()
+        if self.optimizer == "adamw_schedulefree":
+            self.optimizers().train()
         losses, _ = self.common_step(x)
 
         for k, v in losses.items():
@@ -188,7 +193,8 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        self.optimizers().eval()
+        if self.optimizer == "adamw_schedulefree":
+            self.optimizers().eval()
         losses, attn_maps = self.common_step(x)
 
         for k, v in losses.items():

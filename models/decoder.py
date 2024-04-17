@@ -53,12 +53,11 @@ class MLPDecoder(pl.LightningModule):
 
 class TransformerDecoder(pl.LightningModule):
 
-    def __init__(self, dim, depth, resolution) -> None:
+    def __init__(self, dim, depth) -> None:
         super().__init__()
 
         self.dim = dim
         self.depth = depth
-        self.resolution = resolution
 
         self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
 
@@ -70,7 +69,7 @@ class TransformerDecoder(pl.LightningModule):
             ff_swish=True,
         )
 
-    def forward(self, x, context_mask=None):
+    def forward(self, x, resolution, mask=None, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -80,13 +79,17 @@ class TransformerDecoder(pl.LightningModule):
         """
         b, _, _ = x.shape
 
-        grid = make_grid(self.resolution, device=x.device)
+        grid = make_grid(resolution, device=x.device)
         grid = repeat(grid, "h w d -> b (h w) d", b=b)
 
         scaffold = self.pos_enc(grid)
 
         result, hiddens = self.transformer(
-            scaffold, context=x, context_mask=context_mask, return_hiddens=True
+            scaffold,
+            mask=mask,
+            context=x,
+            context_mask=context_mask,
+            return_hiddens=True,
         )
 
         # Last cross-attention map, mean across heads
