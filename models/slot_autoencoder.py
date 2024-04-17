@@ -19,15 +19,15 @@ class SlotAE(pl.LightningModule):
         slot_attention_args: dict,
         feature_decoder_args: dict,
         dim: int,
-        learning_rate: float,
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
-        warmup_steps: int = 0,
         single_decoder: bool = True,
         project_slots: bool = True,
         decode_strategy: str = "random",
         hierarchical: bool = True,
+        optimizer: str = "adamw",
+        optimizer_args: dict = {},
     ):
         super().__init__()
 
@@ -61,14 +61,14 @@ class SlotAE(pl.LightningModule):
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
 
         self.dim = dim
-        self.learning_rate = learning_rate
-        self.warmup_steps = warmup_steps
         self.resolution = resolution
         self.loss_fn = loss_fn
         self.n_slots = n_slots
         self.single_decoder = single_decoder
         self.decode_strategy = decode_strategy
         self.hierarchical = hierarchical
+        self.optimizer = optimizer
+        self.optimizer_args = optimizer_args
 
     # Shorthand
     def forward_features(self, x):
@@ -211,6 +211,7 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return AdamWScheduleFree(
-            self.parameters(), lr=self.learning_rate, warmup_steps=self.warmup_steps
-        )
+        if self.optimizer == "adamw":
+            return AdamW(self.parameters(), **self.optimizer_args)
+        elif self.optimizer == "adamw_schedulefree":
+            return AdamWScheduleFree(self.parameters(), **self.optimizer_args)
