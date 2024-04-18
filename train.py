@@ -1,12 +1,13 @@
 from lightning.pytorch.cli import LightningCLI, SaveConfigCallback
-from lightning.pytorch.loggers import Logger
+from lightning.pytorch.loggers import WandbLogger
 import wandb
 
 
 class MySaveConfigCallback(SaveConfigCallback):
 
     def save_config(self, trainer, pl_module, stage: str) -> None:
-        if isinstance(trainer.logger, Logger):
+
+        if isinstance(trainer.logger, WandbLogger):
             config = self.parser.dump(
                 self.config, skip_none=False
             )  # Required for proper reproducibility

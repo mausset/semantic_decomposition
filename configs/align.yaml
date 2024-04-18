@@ -1,18 +1,16 @@
 seed_everything: 42
 
 model:
-  class_path: models.slot_autoencoder.SlotAE
+  class_path: models.aligner.Aligner
   init_args:
-    dim: 384 
-    learning_rate: 5e-4
-    warmup_steps: 500
+    dim: 768
     resolution: [224, 224]
-    n_slots: [[9, 8], [7, 6, 5, 4, 3]]
+    n_slots: 7
+    optimizer: adamw
+    optimizer_args:
+      lr: 2e-4
+      weight_decay: 1e-2
     image_encoder_name: 'vit_base_patch14_reg4_dinov2.lvd142m'
-    project_slots: True
-    decode_strategy: all
-    loss_fn: 
-      class_path: torch.nn.MSELoss
     slot_attention_arch: sat
     slot_attention_args:
       input_dim: ${..dim}
@@ -20,26 +18,26 @@ model:
       depth: 1
       n_iters: 5
       implicit: True
-      sample_strategy: learned
+      sample_strategy: prior
     feature_decoder_args:
       dim: ${..dim}
       depth: 4
-      resolution: [16, 16]
 
 data:
-  class_path: dataset.coco.COCO
+  class_path: dataset.coco.COCOCap
   init_args:
-    data_dir: ./data/coco/coco2017
+    root_dir: ./data/coco
     num_workers: 7
-    batch_size: 2
+    batch_size: 16
     resolution: 224
 
 trainer:
-  accumulate_grad_batches: 2
+  accelerator: mps
+  accumulate_grad_batches: 4
   logger: 
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
-      project: "semdec"
+      project: "align"
       save_dir: ./lightning_logs
   val_check_interval: 0.01
   limit_val_batches: 1

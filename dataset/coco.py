@@ -1,13 +1,18 @@
 import os
-from torch.utils.data import Dataset, DataLoader
+import random
+
 import lightning as pl
+from torch.utils.data import DataLoader, Dataset
+from torchvision.datasets import CocoCaptions
 from torchvision.io import read_image
 from torchvision.transforms import (
-    Compose,
-    Resize,
     CenterCrop,
-    RandomHorizontalFlip,
+    Compose,
+    Grayscale,
     Normalize,
+    RandomHorizontalFlip,
+    Resize,
+    ToTensor,
 )
 
 
@@ -105,3 +110,71 @@ class COCO(pl.LightningDataModule):
 
     def test_dataloader(self):
         raise NotImplementedError
+
+
+class COCOCap(pl.LightningDataModule):
+
+    def __init__(
+        self,
+        root_dir,
+        batch_size=32,
+        resolution=64,
+        num_workers=4,
+    ):
+        super().__init__()
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.resolution = resolution
+        self.num_workers = num_workers
+
+        self.transform = Compose(
+            [
+                ToTensor(),
+                Grayscale(num_output_channels=3),
+                Resize(resolution),
+                CenterCrop(resolution),
+                RandomHorizontalFlip(),
+                Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            ]
+        )
+
+    def setup(self, stage=None):
+        train_root = os.path.join(self.root_dir, "coco2017/train")
+        train_ann = os.path.join(self.root_dir, "annotations/captions_train2017.json")
+        print(train_root)
+        print(train_ann)
+        self.train = CocoCaptions(
+            root=train_root,
+            annFile=train_ann,
+            transform=self.transform,
+            target_transform=random.choice,
+        )
+
+        val_root = os.path.join(self.root_dir, "coco2017/val")
+        val_ann = os.path.join(self.root_dir, "annotations/captions_val2017.json")
+        print(val_root)
+        print(val_ann)
+        self.val = CocoCaptions(
+            root=val_root,
+            annFile=val_ann,
+            transform=self.transform,
+            target_transform=random.choice,
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            persistent_workers=True,
+            shuffle=True,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            persistent_workers=True,
+            shuffle=True,
+        )

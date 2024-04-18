@@ -1,9 +1,13 @@
 import numpy as np
 import seaborn as sns
 import torch
+from einops import rearrange, repeat
+from matplotlib.colors import to_hex
+import matplotlib.pyplot as plt
 from torch.nn import functional as F
 from torchvision.transforms import Normalize
-from einops import rearrange, repeat
+
+from PIL import Image, ImageDraw, ImageFont
 
 
 def denormalize_imagenet(img):
@@ -84,3 +88,138 @@ def plot_attention_hierarchical(
         rows.append(torch.cat(collect[i * w : (i + 1) * w], dim=2))
 
     return torch.cat(rows, dim=1)
+
+
+def plot_alignment(
+    img, img_attn_map, txt, txt_attn_map, patch_size=14, palette="muted", alpha=0.4
+):
+    """
+    args:
+        img: (3, H, W), image tensor
+        img_attn_map: (B, HW, N), image attention map
+
+        txt: (L), caption tensor
+        txt_attn_map: (L, N), caption attention map
+    returns:
+        (3, H, W), image with attention map overlay
+        (L), caption colored by attention map, same colors as image
+    """
+    _, n = img_attn_map.shape
+
+    img = denormalize_imagenet(img)
+
+    side = img.shape[-1] // patch_size
+    img_attn_map = rearrange(img_attn_map, "(h w) n -> h w n", h=side)
+
+    max_idx = img_attn_map.argmax(dim=-1, keepdim=True)
+
+    attn_mask = (
+        F.one_hot(max_idx.squeeze(-1), num_classes=n)
+        .float()
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+    )
+    attn_mask = F.interpolate(
+        attn_mask, scale_factor=patch_size, mode="nearest"
+    ).squeeze(0)
+
+    palette = sns.color_palette(palette, n)
+    palette_array = np.array(palette)
+    colors = torch.tensor(palette_array[:, :3], dtype=torch.float32).to(img.device)
+
+    colors = repeat(colors, "n c -> n c 1 1")
+
+    attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
+    segment = (colors * attn_mask).sum(dim=0)
+    segmented_img = img * alpha + segment * (1 - alpha)
+
+    rendered_txt = render_text_image(txt, palette_array, txt_attn_map, show_image=True)
+
+    return segmented_img, rendered_txt
+
+
+def render_text_image(
+    text,
+    palette_array,
+    text_attn_map,
+    font_path="AmericanTypewriter.ttc",
+    resolution=(224, 224),
+    show_image=False,
+):
+    """
+    Render the text with colored background as an image using Pillow, dynamically adjusting the font size and
+    wrapping the text to fill the image while keeping within specified resolution.
+    args:
+        text: list of words
+        palette_array: the array of colors
+        text_attn_map: the attention map for text
+        font_path: path to the font file
+        resolution: tuple (width, height) of the final image
+        show_image: if True, display the image using Pillow's display method
+    returns:
+        A numpy array of the rendered text image.
+    """
+    print(text)
+    width, height = resolution
+    font_size = 10  # Start with a minimal font size to increase later
+    font = ImageFont.truetype(font_path, font_size)
+
+    # Find a fitting font size
+    while True:
+        font = ImageFont.truetype(font_path, font_size)
+        dummy_image = Image.new("RGB", (1, 1))
+        draw = ImageDraw.Draw(dummy_image)
+        # Calculate width and setup line breaks
+        line_width = 0
+        line_height = (
+            font_size + 10
+        )  # Adjust line height based on font size and padding
+        lines = []
+        current_line = []
+
+        for word in text:
+            word_width = (
+                draw.textlength(word, font=font) + 10
+            )  # Include space after each word
+            if line_width + word_width > width:
+                lines.append(current_line)
+                current_line = [word]
+                line_width = word_width
+            else:
+                current_line.append(word)
+                line_width += word_width
+        if current_line:
+            lines.append(current_line)
+
+        total_height = line_height * len(lines)
+
+        if (
+            total_height > height or font_size > height
+        ):  # Check if text fits or becomes too large
+            font_size -= 1  # Decrease font size if it exceeds height
+            break
+        font_size += 1  # Increase font size gradually
+
+    # Draw the text with the final font size
+    font = ImageFont.truetype(font_path, font_size)
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+
+    y_offset = 10
+    for line in lines:
+        x_offset = 10
+        if y_offset + line_height > height:
+            break  # Stop drawing if there's no space left vertically
+        for word in line:
+            color = tuple(
+                int(c * 255)
+                for c in palette_array[text_attn_map.argmax(dim=-1)[text.index(word)]]
+            )
+            draw.text((x_offset, y_offset), word, font=font, fill=color)
+            x_offset += draw.textlength(word, font=font) + 10
+        y_offset += line_height  # Add line height to move to the next line
+
+    if show_image:
+        image.show()
+
+    return np.array(image)

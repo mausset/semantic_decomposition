@@ -183,7 +183,7 @@ class SAT(nn.Module):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_ica = nn.LayerNorm(slot_dim)
 
-    def sample(self, x, n_slots, cross_attn=True):
+    def sample(self, x, n_slots, cross_attn=False):
         b, _, d = x.shape
 
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
@@ -201,11 +201,16 @@ class SAT(nn.Module):
 
         return sample
 
-    def step(self, slots, k, v, return_attn=False):
+    def step(self, slots, k, v, return_attn=False, mask=None):
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+
+        if mask is not None:
+            # NOTE: Masking attention is sensitive to the chosen value
+            dots.masked_fill_(~mask[:, None, :], -torch.finfo(k.dtype).max)
+
         attn = dots.softmax(dim=1) + self.eps
 
         attn = attn / attn.sum(dim=-1, keepdim=True)
@@ -222,23 +227,23 @@ class SAT(nn.Module):
 
         return slots
 
-    def forward(self, x, n_slots=8, cross_attn=True):
+    def forward(self, x, n_slots=8, mask=None):
 
         x = self.norm_input(x)
 
-        init_slots = self.sample(x, n_slots, cross_attn=cross_attn)
+        init_slots = self.sample(x, n_slots)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots = self.step(slots, k, v)
+            slots = self.step(slots, k, v, mask=mask)
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots
 
-        slots, attn_map = self.step(slots, k, v, return_attn=True)
+        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
