@@ -191,7 +191,7 @@ class Align(pl.LightningModule):
         loss = torch.stack(list(losses.values())).sum()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
-        segmented_img, rendered_caption = plot_alignment(
+        fig = plot_alignment(
             info[0]["img"],
             info[0]["img_attn"],
             info[0]["txt"],
@@ -200,7 +200,7 @@ class Align(pl.LightningModule):
 
         self.logger.log_image(
             key="attention",
-            images=[segmented_img, rendered_caption],
+            images=[fig],
         )
         return loss
 

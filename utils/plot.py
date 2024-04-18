@@ -135,7 +135,14 @@ def plot_alignment(
 
     rendered_txt = render_text_image(txt, palette_array, txt_attn_map, show_image=True)
 
-    return segmented_img, rendered_txt
+    rendered_txt = (
+        torch.tensor(rendered_txt, device=segmented_img.device).permute(2, 0, 1).float()
+        / 255.0
+    )
+
+    figure = torch.cat([segmented_img, rendered_txt], dim=2)
+
+    return figure
 
 
 def render_text_image(
@@ -148,7 +155,7 @@ def render_text_image(
 ):
     """
     Render the text with colored background as an image using Pillow, dynamically adjusting the font size and
-    wrapping the text to fill the image while keeping within specified resolution.
+    wrapping the text to more conservatively fill the image while keeping within specified resolution and avoiding cut-offs.
     args:
         text: list of words
         palette_array: the array of colors
@@ -159,29 +166,25 @@ def render_text_image(
     returns:
         A numpy array of the rendered text image.
     """
-    print(text)
     width, height = resolution
     font_size = 10  # Start with a minimal font size to increase later
     font = ImageFont.truetype(font_path, font_size)
 
-    # Find a fitting font size
+    # Increase font size conservatively to fit text
     while True:
         font = ImageFont.truetype(font_path, font_size)
         dummy_image = Image.new("RGB", (1, 1))
         draw = ImageDraw.Draw(dummy_image)
-        # Calculate width and setup line breaks
         line_width = 0
         line_height = (
-            font_size + 10
-        )  # Adjust line height based on font size and padding
+            font_size * 1.2
+        )  # Using a 1.2 scaling factor for line height to ensure padding
         lines = []
         current_line = []
 
         for word in text:
-            word_width = (
-                draw.textlength(word, font=font) + 10
-            )  # Include space after each word
-            if line_width + word_width > width:
+            word_width = draw.textlength(word, font=font) + 10  # Width with padding
+            if line_width + word_width > width - 20:  # Consider padding on both sides
                 lines.append(current_line)
                 current_line = [word]
                 line_width = word_width
@@ -194,22 +197,20 @@ def render_text_image(
         total_height = line_height * len(lines)
 
         if (
-            total_height > height or font_size > height
-        ):  # Check if text fits or becomes too large
-            font_size -= 1  # Decrease font size if it exceeds height
+            total_height > height - 20 or font_size > height / 10
+        ):  # Stop if too tall or font size unreasonable
+            font_size -= 2  # Step back by two sizes to be more conservative
             break
-        font_size += 1  # Increase font size gradually
+        font_size += 1
 
-    # Draw the text with the final font size
+    # Draw the text onto the final image with the last fitting font size
     font = ImageFont.truetype(font_path, font_size)
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
 
-    y_offset = 10
+    y_offset = 10  # Start drawing slightly down from the top
     for line in lines:
-        x_offset = 10
-        if y_offset + line_height > height:
-            break  # Stop drawing if there's no space left vertically
+        x_offset = 10  # Start slightly in from the left
         for word in line:
             color = tuple(
                 int(c * 255)
@@ -217,7 +218,7 @@ def render_text_image(
             )
             draw.text((x_offset, y_offset), word, font=font, fill=color)
             x_offset += draw.textlength(word, font=font) + 10
-        y_offset += line_height  # Add line height to move to the next line
+        y_offset += int(line_height)  # Move down to the next line
 
     if show_image:
         image.show()

@@ -1,7 +1,7 @@
 seed_everything: 42
 
 model:
-  class_path: models.aligner.Aligner
+  class_path: models.align.Align
   init_args:
     dim: 768
     resolution: [224, 224]
