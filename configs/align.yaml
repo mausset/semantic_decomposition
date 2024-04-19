@@ -6,6 +6,7 @@ model:
     dim: 768
     resolution: [224, 224]
     n_slots: 7
+    font_path: "Arial.ttf"
     optimizer: adamw
     optimizer_args:
       lr: 2e-4

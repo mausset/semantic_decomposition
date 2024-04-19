@@ -28,6 +28,7 @@ class Align(pl.LightningModule):
         n_img_slots=32,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
+        font_path: str = "Arial.ttf",
     ):
         super().__init__()
 
@@ -99,6 +100,7 @@ class Align(pl.LightningModule):
         self.n_img_slots = n_img_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
+        self.font_path = font_path
 
     # Shorthand
     def forward_features_img(self, x):
@@ -221,6 +223,7 @@ class Align(pl.LightningModule):
             info[0]["img_attn"],
             info[0]["txt"],
             info[0]["txt_attn"],
+            font_path=self.font_path,
         )
 
         self.logger.log_image(
