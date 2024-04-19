@@ -133,7 +133,7 @@ def plot_alignment(
     segment = (colors * attn_mask).sum(dim=0)
     segmented_img = img * alpha + segment * (1 - alpha)
 
-    rendered_txt = render_text_image(txt, palette_array, txt_attn_map, show_image=True)
+    rendered_txt = render_text_image(txt, palette_array, txt_attn_map)
 
     rendered_txt = (
         torch.tensor(rendered_txt, device=segmented_img.device).permute(2, 0, 1).float()

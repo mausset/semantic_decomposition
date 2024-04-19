@@ -11,6 +11,8 @@ from torch.optim import AdamW
 from transformers import RobertaModel, RobertaTokenizer
 from utils.plot import plot_alignment
 
+from x_transformers import Encoder
+
 
 class Align(pl.LightningModule):
 
@@ -23,6 +25,7 @@ class Align(pl.LightningModule):
         dim: int,
         resolution: tuple[int, int],
         n_slots=7,
+        n_img_slots=32,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -37,6 +40,10 @@ class Align(pl.LightningModule):
             )
             .eval()
             .requires_grad_(False)
+        )
+
+        self.image_slot_attention = build_slot_attention(
+            slot_attention_arch, slot_attention_args
         )
 
         self.text_tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
@@ -56,6 +63,13 @@ class Align(pl.LightningModule):
 
         self.slot_attention = build_slot_attention(
             slot_attention_arch, slot_attention_args
+        )
+
+        self.slot_encoder = Encoder(
+            dim=dim,
+            depth=4,
+            ff_glu=True,
+            ff_swish=True,
         )
 
         self.project_slots_img = nn.Sequential(
@@ -82,6 +96,7 @@ class Align(pl.LightningModule):
         )
         self.loss_fn = F.mse_loss
         self.n_slots = n_slots
+        self.n_img_slots = n_img_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
 
@@ -105,8 +120,14 @@ class Align(pl.LightningModule):
         img, txt = x
 
         features_img = self.forward_features_img(img)
-        mask_img = torch.ones_like(features_img[:, :, 0]).bool()
-        features_proj_img = self.project_features_img(features_img)
+
+        slots_img, attn_map_img = self.image_slot_attention(
+            features_img, n_slots=self.n_img_slots
+        )
+
+        mask_img = torch.ones_like(slots_img[:, :, 0]).bool()
+
+        features_proj_img = self.project_features_img(slots_img)
 
         features_txt, mask_txt, token_ids = self.forward_features_txt(txt)
         features_proj_txt = self.project_features_txt(features_txt)
@@ -114,7 +135,11 @@ class Align(pl.LightningModule):
         features = torch.cat([features_proj_img, features_proj_txt], dim=1)
         mask = torch.cat([mask_img, mask_txt], dim=1)
 
-        slots, attn_map = self.slot_attention(features, n_slots=self.n_slots, mask=mask)
+        encoded_features = self.slot_encoder(features, mask=mask)
+
+        slots, attn_map = self.slot_attention(
+            encoded_features, n_slots=self.n_slots, mask=mask
+        )
 
         slots_img = self.project_slots_img(slots)
         slots_txt = self.project_slots_txt(slots)
@@ -144,8 +169,8 @@ class Align(pl.LightningModule):
             "txt": loss_txt,
         }
 
-        attn_map_img = attn_map[:, : features_img.size(1)]
-        attn_map_txt = attn_map[:, features_img.size(1) :]
+        attn_map_img = attn_map_img @ attn_map[:, : features_proj_img.size(1)]
+        attn_map_txt = attn_map[:, features_proj_img.size(1) :]
 
         tokens_txt = [
             self.text_tokenizer.convert_ids_to_tokens(ids.tolist()) for ids in token_ids
