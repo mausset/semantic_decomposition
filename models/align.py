@@ -25,7 +25,8 @@ class Align(pl.LightningModule):
         dim: int,
         resolution: tuple[int, int],
         n_slots=7,
-        n_img_slots=32,
+        n_img_slots=7,
+        n_txt_slots=3,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
         font_path: str = "Arial.ttf",
@@ -44,6 +45,10 @@ class Align(pl.LightningModule):
         )
 
         self.image_slot_attention = build_slot_attention(
+            slot_attention_arch, slot_attention_args
+        )
+
+        self.text_slot_attention = build_slot_attention(
             slot_attention_arch, slot_attention_args
         )
 
@@ -73,13 +78,7 @@ class Align(pl.LightningModule):
             ff_swish=True,
         )
 
-        self.project_slots_img = nn.Sequential(
-            SwiGLUFFN(dim),
-            nn.LayerNorm(dim),
-        )
-
-        self.project_slots_txt = nn.Sequential(
-            SwiGLUFFN(dim),
+        self.project_slots = nn.Sequential(
             nn.LayerNorm(dim),
         )
 
@@ -98,6 +97,7 @@ class Align(pl.LightningModule):
         self.loss_fn = F.mse_loss
         self.n_slots = n_slots
         self.n_img_slots = n_img_slots
+        self.n_txt_slots = n_txt_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
         self.font_path = font_path
@@ -132,28 +132,32 @@ class Align(pl.LightningModule):
         features_proj_img = self.project_features_img(slots_img)
 
         features_txt, mask_txt, token_ids = self.forward_features_txt(txt)
-        features_proj_txt = self.project_features_txt(features_txt)
 
-        features = torch.cat([features_proj_img, features_proj_txt], dim=1)
-        mask = torch.cat([mask_img, mask_txt], dim=1)
-
-        encoded_features = self.slot_encoder(features, mask=mask)
-
-        slots, attn_map = self.slot_attention(
-            encoded_features, n_slots=self.n_slots, mask=mask
+        slots_txt, attn_map_txt = self.text_slot_attention(
+            features_txt, n_slots=self.n_txt_slots, mask=mask_txt
         )
 
-        slots_img = self.project_slots_img(slots)
-        slots_txt = self.project_slots_txt(slots)
+        features_proj_txt = self.project_features_txt(slots_txt)
+
+        features = torch.cat([features_proj_img, features_proj_txt], dim=1)
+        # mask = torch.cat([mask_img, mask_txt], dim=1)
+
+        encoded_features = self.slot_encoder(features)  # , mask=mask)
+
+        slots, attn_map = self.slot_attention(
+            encoded_features, n_slots=self.n_slots  # , mask=mask
+        )
+
+        slots = self.project_slots(slots)
 
         recon_features_img, _ = self.feature_decoder_img(
-            slots_img,
+            slots,
             self.img_feature_resolution,
         )
 
         text_resolution = (1, features_txt.size(1))
         recon_features_txt, _ = self.feature_decoder_txt(
-            slots_txt, text_resolution, mask=mask_txt
+            slots, text_resolution, mask=mask_txt
         )
 
         recon_features_txt = recon_features_txt * mask_txt.unsqueeze(-1)
@@ -172,7 +176,7 @@ class Align(pl.LightningModule):
         }
 
         attn_map_img = attn_map_img @ attn_map[:, : features_proj_img.size(1)]
-        attn_map_txt = attn_map[:, features_proj_img.size(1) :]
+        attn_map_txt = attn_map_txt @ attn_map[:, features_proj_img.size(1) :]
 
         tokens_txt = [
             self.text_tokenizer.convert_ids_to_tokens(ids.tolist()) for ids in token_ids
