@@ -4,12 +4,14 @@ model:
   class_path: models.slot_autoencoder.SlotAE
   init_args:
     dim: 384 
-    learning_rate: 5e-4
-    warmup_steps: 500
     resolution: [224, 224]
     n_slots: [[9, 8], [7, 6, 5, 4, 3]]
-    image_encoder_name: 'vit_base_patch14_reg4_dinov2.lvd142m'
+    image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
     project_slots: True
+    optimizer: adamw
+    optimizer_args:
+      lr: 2e-4
+      weight_decay: 1e-2
     decode_strategy: all
     loss_fn: 
       class_path: torch.nn.MSELoss
@@ -20,11 +22,9 @@ model:
       depth: 1
       n_iters: 5
       implicit: True
-      sample_strategy: learned
     feature_decoder_args:
       dim: ${..dim}
       depth: 4
-      resolution: [16, 16]
 
 data:
   class_path: dataset.coco.COCO

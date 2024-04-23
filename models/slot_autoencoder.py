@@ -85,32 +85,17 @@ class SlotAE(pl.LightningModule):
 
         attn_maps = []
         slots_dict = {}
-        first = True
         for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
+            if isinstance(n_slots, int):
+                n_slots = [n_slots]
 
             # Check if n_slots is a list
-            if isinstance(n_slots, list):
-                for n_slot in n_slots:
-                    slots, attn_map = slot_attention(
-                        slots, n_slot, cross_attn=not first
-                    )
-                    if attn_maps:
-                        attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
-                    attn_maps.append((attn_map,))
-                    slots_dict[n_slot] = self.project_slots(slots)
-
-                    first = False
-
-                    if not self.hierarchical:
-                        slots = features
-            else:
-                slots, attn_map = slot_attention(slots, n_slots, cross_attn=not first)
+            for n in n_slots:
+                slots, attn_map = slot_attention(slots, n_slots=n)
                 if attn_maps:
                     attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                 attn_maps.append((attn_map,))
-                slots_dict[n_slots] = self.project_slots(slots)
-
-                first = False
+                slots_dict[n] = self.project_slots(slots)
 
                 if not self.hierarchical:
                     slots = features
