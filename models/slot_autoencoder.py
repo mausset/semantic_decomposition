@@ -92,7 +92,7 @@ class SlotAE(pl.LightningModule):
             # Check if n_slots is a list
             for n in n_slots:
                 slots, attn_map = slot_attention(slots, n_slots=n)
-                if attn_maps:
+                if attn_maps and self.hierarchical:
                     attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
                 attn_maps.append((attn_map,))
                 slots_dict[n] = self.project_slots(slots)
