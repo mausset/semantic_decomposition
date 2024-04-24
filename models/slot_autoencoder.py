@@ -3,11 +3,10 @@ import timm
 import torch
 from models.decoder import TransformerDecoder
 from models.slot_attention import build_slot_attention
-from models.components import SwiGLUFFN
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
-from schedulefree import AdamWScheduleFree
+from utils.helpers import compute_combined_attn, pad_batched_slots
 
 
 class SlotAE(pl.LightningModule):
@@ -22,10 +21,8 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
-        single_decoder: bool = True,
-        project_slots: bool = True,
         decode_strategy: str = "random",
-        hierarchical: bool = True,
+        mode: str = "hierarchical",
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -50,7 +47,6 @@ class SlotAE(pl.LightningModule):
         )
 
         self.project_slots = nn.Sequential(
-            SwiGLUFFN(dim) if project_slots else nn.Identity(),
             nn.LayerNorm(dim),
         )
 
@@ -68,9 +64,8 @@ class SlotAE(pl.LightningModule):
         )
         self.loss_fn = loss_fn
         self.n_slots = n_slots
-        self.single_decoder = single_decoder
         self.decode_strategy = decode_strategy
-        self.hierarchical = hierarchical
+        self.mode = mode
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
 
@@ -83,90 +78,64 @@ class SlotAE(pl.LightningModule):
         features = self.forward_features(x)
         slots = features
 
-        attn_maps = []
+        attn_list = []
+        slots_list = [features]
         slots_dict = {}
         for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
             if isinstance(n_slots, int):
                 n_slots = [n_slots]
 
-            # Check if n_slots is a list
             for n in n_slots:
-                slots, attn_map = slot_attention(slots, n_slots=n)
-                if attn_maps and self.hierarchical:
-                    attn_map = attn_maps[-1][0] @ attn_map  # Propagate attention
-                attn_maps.append((attn_map,))
-                slots_dict[n] = self.project_slots(slots)
 
-                if not self.hierarchical:
-                    slots = features
+                match self.mode:
+                    case "hierarchical":
+                        slots, attn_map = slot_attention(slots, n_slots=n)
+                        attn_map = attn_map[0]
+                        if attn_list:
+                            attn_map = attn_list[-1] @ attn_map
+                    case "multi_scale":
+                        slots, attn_maps = slot_attention(slots_list, n_slots=n)
+                        slots_list.append(slots)
+                        attn_map = compute_combined_attn(attn_list, attn_maps)
+                    case "flat":
+                        slots = features
+                        slots, attn_map = slot_attention(slots, n_slots=n)
+                        attn_map = attn_map[0]
+
+                slots_dict[n] = self.project_slots(slots)
+                attn_list.append(attn_map)
 
         losses = {}
-        if self.decode_strategy == "random":
-            slot_keys = list(slots_dict.keys())
-            sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
-            slots = slots_dict[sampled_key]
-            decoded_features, _ = self.feature_decoder(slots, self.feature_resolution)
-
-            losses[sampled_key] = self.loss_fn(decoded_features, features)
-        elif self.decode_strategy == "all":
-            slot_keys = list(slots_dict.keys())
-            slot_values = list(slots_dict.values())
-
-            mask = [
-                torch.ones(slot.shape[:2], device=slot.device) for slot in slot_values
-            ]
-
-            max_slots = max(slot_keys)
-            padded_slots = []
-            padded_mask = []
-            for i, slot in enumerate(slot_values):
-                padding = max_slots - slot.shape[1]
-                padded_slots.append(
-                    torch.cat(
-                        [
-                            slot,
-                            torch.zeros(
-                                slot.shape[0],
-                                padding,
-                                slot.shape[2],
-                                device=slot.device,
-                            ),
-                        ],
-                        dim=1,
-                    )
-                )
-                padded_mask.append(
-                    torch.cat(
-                        [
-                            mask[i],
-                            torch.zeros(mask[i].shape[0], padding, device=slot.device),
-                        ],
-                        dim=1,
-                    )
+        match self.decode_strategy:
+            case "random":
+                slot_keys = list(slots_dict.keys())
+                sampled_key = slot_keys[torch.randint(len(slot_keys), (1,))]
+                slots = slots_dict[sampled_key]
+                decoded_features, _ = self.feature_decoder(
+                    slots, self.feature_resolution
                 )
 
-            padded_slots = torch.cat(padded_slots, dim=0)
-            padded_mask = torch.cat(padded_mask, dim=0).bool()
+                losses[sampled_key] = self.loss_fn(decoded_features, features)
 
-            decoded_features, _ = self.feature_decoder(
-                padded_slots, self.feature_resolution, context_mask=padded_mask
-            )
+            case "all":
+                padded_slots, padded_mask = pad_batched_slots(slots_dict)
 
-            chunked_decoded_features = torch.chunk(
-                decoded_features, len(slot_keys), dim=0
-            )
+                decoded_features, _ = self.feature_decoder(
+                    padded_slots, self.feature_resolution, context_mask=padded_mask
+                )
 
-            for slot_key, chunk in zip(slot_keys, chunked_decoded_features):
-                losses[slot_key] = self.loss_fn(chunk, features)
+                chunked_decoded_features = torch.chunk(
+                    decoded_features, len(slots_dict), dim=0
+                )
 
-        else:
-            raise NotImplementedError
+                for slot_key, chunk in zip(slots_dict.keys(), chunked_decoded_features):
+                    losses[slot_key] = self.loss_fn(chunk, features)
+            case _:
+                raise NotImplementedError
 
-        return losses, attn_maps
+        return losses, attn_list
 
     def training_step(self, x):
-        if self.optimizer == "adamw_schedulefree":
-            self.optimizers().train()
         losses, _ = self.common_step(x)
 
         for k, v in losses.items():
@@ -178,9 +147,7 @@ class SlotAE(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        if self.optimizer == "adamw_schedulefree":
-            self.optimizers().eval()
-        losses, attn_maps = self.common_step(x)
+        losses, attn_list = self.common_step(x)
 
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v, sync_dist=True)
@@ -188,21 +155,23 @@ class SlotAE(pl.LightningModule):
         loss = torch.stack(list(losses.values())).mean()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
-        self.logger.log_image(
-            key="attention",
-            images=[
-                plot_attention_hierarchical(
-                    x[0],
-                    attn_maps,
-                    res=self.resolution[0],
-                    patch_size=self.patch_size,
-                )
-            ],
+        attention_plot = plot_attention_hierarchical(
+            x[0],
+            attn_list,
+            res=self.resolution[0],
+            patch_size=self.patch_size,
         )
+
+        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger):
+            self.logger.log_image(
+                key="attention",
+                images=[attention_plot],
+            )
+
         return loss
 
     def configure_optimizers(self):
         if self.optimizer == "adamw":
             return AdamW(self.parameters(), **self.optimizer_args)
-        elif self.optimizer == "adamw_schedulefree":
-            return AdamWScheduleFree(self.parameters(), **self.optimizer_args)
+        else:
+            raise NotImplementedError

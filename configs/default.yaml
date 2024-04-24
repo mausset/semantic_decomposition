@@ -7,7 +7,7 @@ model:
     resolution: [224, 224]
     n_slots: [[9, 8], [7, 6, 5, 4, 3]]
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
-    project_slots: True
+    mode: multi_scale
     optimizer: adamw
     optimizer_args:
       lr: 2e-4
@@ -31,11 +31,11 @@ data:
   init_args:
     data_dir: ./data/coco/coco2017
     num_workers: 7
-    batch_size: 2
+    batch_size: 4
     resolution: 224
 
 trainer:
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 4
   logger: 
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:

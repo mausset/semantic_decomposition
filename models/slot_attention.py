@@ -25,7 +25,6 @@ class SA(pl.LightningModule):
         slot_dim,
         n_iters=3,
         implicit=False,
-        sample_strategy="prior",
         ff_swiglu=False,
         eps=1e-8,
     ):
@@ -34,7 +33,6 @@ class SA(pl.LightningModule):
         self.slot_dim = slot_dim
         self.n_iters = n_iters
         self.implicit = implicit
-        self.sample_strategy = sample_strategy
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -43,15 +41,6 @@ class SA(pl.LightningModule):
         init_log_sigma = torch.empty((1, 1, slot_dim))
         nn.init.xavier_uniform_(init_log_sigma)
         self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
-
-        if sample_strategy == "learned":
-            self.dec = Encoder(
-                dim=slot_dim,
-                depth=4,
-                ff_glu=True,
-                ff_swish=True,
-                cross_attend=True,
-            )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -80,9 +69,6 @@ class SA(pl.LightningModule):
 
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
 
-        if self.sample_strategy == "learned":
-            sample = self.dec(sample, context=x)
-
         return sample
 
     def step(self, slots, k, v, return_attn=False):
@@ -109,7 +95,6 @@ class SA(pl.LightningModule):
         return slots
 
     def forward(self, x, n_slots=8):
-        b, _, _ = x.shape
 
         x = self.norm_input(x)
 
@@ -141,7 +126,6 @@ class SAT(nn.Module):
         n_iters=3,
         implicit=False,
         depth=1,
-        sample_strategy="prior",
         eps=1e-8,
     ):
         super().__init__()
@@ -149,7 +133,6 @@ class SAT(nn.Module):
         self.slot_dim = slot_dim
         self.n_iters = n_iters
         self.implicit = implicit
-        self.sample_strategy = sample_strategy
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -158,15 +141,6 @@ class SAT(nn.Module):
         init_log_sigma = torch.empty((1, 1, slot_dim))
         nn.init.xavier_uniform_(init_log_sigma)
         self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
-
-        if sample_strategy == "learned":
-            self.primer = Encoder(
-                dim=slot_dim,
-                depth=4,
-                ff_glu=True,
-                ff_swish=True,
-                cross_attend=True,
-            )
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -183,27 +157,17 @@ class SAT(nn.Module):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_ica = nn.LayerNorm(slot_dim)
 
-    def sample(self, x, n_slots, cross_attn=False):
-        b, _, d = x.shape
+    def sample(self, x, n_slots):
+        b, _, _ = x.shape
 
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
         log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
 
         sample = mu + log_sigma.exp() * torch.randn_like(mu)
 
-        if self.sample_strategy == "learned":
-            if cross_attn:
-                context = x
-            else:
-                context = torch.zeros(b, 1, d, device=x.device)
-
-            sample = self.primer(sample, context=context)
-
         return sample
 
-    def step(self, slots, k, v, return_attn=False, mask=None):
-
-        q = self.inv_cross_q(self.norm_slots(slots))
+    def inv_cross_attn(self, q, k, v, mask=None):
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
 
@@ -217,6 +181,19 @@ class SAT(nn.Module):
 
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
+        return updates, attn
+
+    def step(self, slots, k, v, return_attn=False, mask=None):
+
+        q = self.inv_cross_q(self.norm_slots(slots))
+
+        updates_attn = [self.inv_cross_attn(q, ki, vi) for ki, vi in zip(k, v)]
+
+        updates = [ui for ui, _ in updates_attn]
+        attn = [attn for _, attn in updates_attn]
+
+        updates = torch.stack(updates, dim=0).mean(dim=0)
+
         slots = slots + updates
         slots = self.norm_ica(slots)
 
@@ -229,13 +206,16 @@ class SAT(nn.Module):
 
     def forward(self, x, n_slots=8, mask=None):
 
-        x = self.norm_input(x)
+        if isinstance(x, torch.Tensor):
+            x = [x]
 
-        init_slots = self.sample(x, n_slots)
+        x = [self.norm_input(xi) for xi in x]
+
+        init_slots = self.sample(x[0], n_slots)
         slots = init_slots.clone()
 
-        k = self.inv_cross_k(x)
-        v = self.inv_cross_v(x)
+        k = [self.inv_cross_k(xi) for xi in x]
+        v = [self.inv_cross_v(xi) for xi in x]
 
         for _ in range(self.n_iters):
             slots = self.step(slots, k, v, mask=mask)
@@ -243,8 +223,8 @@ class SAT(nn.Module):
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots
 
-        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
+        slots, attn_maps = self.step(slots, k, v, return_attn=True, mask=mask)
 
-        attn_map = rearrange(attn_map, "b n hw -> b hw n")
+        attn_maps = [rearrange(attn_map, "b n hw -> b hw n") for attn_map in attn_maps]
 
-        return slots, attn_map
+        return slots, attn_maps

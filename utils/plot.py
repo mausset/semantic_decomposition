@@ -18,14 +18,14 @@ def denormalize_imagenet(img):
 
 def plot_attention(
     img,
-    attn_maps,
+    attn_map,
     res=224,
     patch_size=14,
     palette="muted",
     alpha=0.4,
     include_original=False,
 ):
-    _, n = attn_maps[0][0].shape
+    _, n = attn_map.shape
 
     img = denormalize_imagenet(img)
 
@@ -34,25 +34,23 @@ def plot_attention(
     colors = repeat(colors, "n c -> n c 1 1")
 
     cat_imgs = [img]
-    for attn_map in attn_maps:
-        attn_map = attn_map[0]
-        attn_map = rearrange(attn_map, "(h w) n -> h w n", h=res // patch_size)
-        max_idx = attn_map.argmax(dim=-1, keepdim=True)
+    attn_map = rearrange(attn_map, "(h w) n -> h w n", h=res // patch_size)
+    max_idx = attn_map.argmax(dim=-1, keepdim=True)
 
-        attn_mask = (
-            F.one_hot(max_idx.squeeze(-1), num_classes=n)
-            .float()
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-        )
-        attn_mask = F.interpolate(
-            attn_mask, scale_factor=patch_size, mode="nearest"
-        ).squeeze(0)
+    attn_mask = (
+        F.one_hot(max_idx.squeeze(-1), num_classes=n)
+        .float()
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+    )
+    attn_mask = F.interpolate(
+        attn_mask, scale_factor=patch_size, mode="nearest"
+    ).squeeze(0)
 
-        attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
-        segment = (colors * attn_mask).sum(dim=0)
-        segmented_img = img * alpha + segment * (1 - alpha)
-        cat_imgs.append(segmented_img)
+    attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
+    segment = (colors * attn_mask).sum(dim=0)
+    segmented_img = img * alpha + segment * (1 - alpha)
+    cat_imgs.append(segmented_img)
 
     if include_original:
         cat_img = torch.cat(cat_imgs, dim=2)
@@ -72,8 +70,9 @@ def plot_attention_hierarchical(
 ):
 
     collect = []
+
     for attn_t in attn_maps:
-        collect.append(plot_attention(img, attn_t, res, patch_size, palette, alpha))
+        collect.append(plot_attention(img, attn_t[0], res, patch_size, palette, alpha))
 
     w = int(np.ceil(np.sqrt(len(collect))))
     h = int(np.ceil(len(collect) / w))
