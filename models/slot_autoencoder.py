@@ -97,6 +97,11 @@ class SlotAE(pl.LightningModule):
                         slots, attn_maps = slot_attention(slots_list, n_slots=n)
                         slots_list.append(slots)
                         attn_map = compute_combined_attn(attn_list, attn_maps)
+                    case "propagate":
+                        prev_attn = attn_list[-1] if attn_list else None
+                        slots, attn_map = slot_attention(
+                            features, slots, prev_attn, n_slots=n
+                        )
                     case "flat":
                         slots = features
                         slots, attn_map = slot_attention(slots, n_slots=n)
