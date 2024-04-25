@@ -42,7 +42,7 @@ class COCODataset(Dataset):
         for filename in os.listdir(self.data_dir):
             db.append(filename)
 
-        return db
+        return sorted(db)
 
     def _index_to_entry(self, index):
         return self.db[index]
