@@ -23,6 +23,7 @@ class SlotAE(pl.LightningModule):
         n_slots=[16, 8],
         decode_strategy: str = "random",
         mode: str = "hierarchical",
+        detach_slots: bool = False,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -66,6 +67,7 @@ class SlotAE(pl.LightningModule):
         self.n_slots = n_slots
         self.decode_strategy = decode_strategy
         self.mode = mode
+        self.detach_slots = detach_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
 
@@ -95,7 +97,9 @@ class SlotAE(pl.LightningModule):
                             attn_map = attn_list[-1] @ attn_map
                     case "multi_scale":
                         slots, attn_maps = slot_attention(slots_list, n_slots=n)
-                        slots_list.append(slots)
+                        slots_list.append(
+                            slots.detach() if self.detach_slots else slots
+                        )
                         attn_map = compute_combined_attn(attn_list, attn_maps)
                     case "flat":
                         slots = features
