@@ -21,6 +21,7 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
+        ignore_slots=[],
         decode_strategy: str = "random",
         mode: str = "hierarchical",
         optimizer: str = "adamw",
@@ -70,6 +71,7 @@ class SlotAE(pl.LightningModule):
         )
         self.loss_fn = loss_fn
         self.n_slots = n_slots
+        self.ignore_slots = ignore_slots
         self.decode_strategy = decode_strategy
         self.mode = mode
         self.optimizer = optimizer
@@ -113,9 +115,11 @@ class SlotAE(pl.LightningModule):
                         slots, attn_map = slot_attention(slots, n_slots=n)
                         attn_map = attn_map[0]
 
-                slots_dict[n] = self.project_slots(slots)
+                if n not in self.ignore_slots:
+                    slots_dict[n] = self.project_slots(slots)
                 attn_list.append(attn_map)
 
+        attn_list = attn_list[len(self.ignore_slots) :]
         losses = {}
         match self.decode_strategy:
             case "random":
