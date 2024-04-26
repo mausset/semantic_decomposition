@@ -39,6 +39,11 @@ class SlotAE(pl.LightningModule):
             .requires_grad_(False)
         )
 
+        self.project_features = nn.Sequential(
+            nn.Linear(dim, slot_attention_args["input_dim"]),
+            nn.LayerNorm(slot_attention_args["input_dim"]),
+        )
+
         self.slot_attention = nn.ModuleList(
             [
                 build_slot_attention(slot_attention_arch, slot_attention_args)
@@ -47,6 +52,7 @@ class SlotAE(pl.LightningModule):
         )
 
         self.project_slots = nn.Sequential(
+            nn.Linear(slot_attention_args["slot_dim"], dim),
             nn.LayerNorm(dim),
         )
 
@@ -76,7 +82,7 @@ class SlotAE(pl.LightningModule):
     def common_step(self, x):
 
         features = self.forward_features(x)
-        slots = features
+        slots = self.project_features(features)
 
         attn_list = []
         slots_list = [features]

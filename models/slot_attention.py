@@ -151,13 +151,13 @@ class SAT(nn.Module):
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=ica_bias)
 
         self.t_encoder = Encoder(
-            dim=input_dim,
+            dim=slot_dim,
             depth=depth,
             ff_glu=True,
             ff_swish=True,
         )
 
-        self.norm_input = nn.LayerNorm(input_dim)
+        self.norm_input = nn.LayerNorm(slot_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_ica = nn.LayerNorm(slot_dim)
 

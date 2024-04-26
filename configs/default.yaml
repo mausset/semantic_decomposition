@@ -5,9 +5,9 @@ model:
   init_args:
     dim: 384 
     resolution: [224, 224]
-    n_slots: [[9, 8], [7, 6, 5, 4, 3]]
+    n_slots: [[9, 8, 7, 6, 5, 4, 3]]
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
-    mode: propagate
+    mode: hierarchical
     optimizer: adamw
     optimizer_args:
       lr: 2e-4
@@ -15,10 +15,10 @@ model:
     decode_strategy: all
     loss_fn: 
       class_path: torch.nn.MSELoss
-    slot_attention_arch: psat
+    slot_attention_arch: sat
     slot_attention_args:
-      input_dim: ${..dim}
-      slot_dim: ${..dim}
+      input_dim: 768
+      slot_dim: 768
       depth: 1
       n_iters: 5
       implicit: True
