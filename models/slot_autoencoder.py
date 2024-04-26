@@ -8,6 +8,8 @@ from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
 from utils.helpers import compute_combined_attn, pad_batched_slots
 
+from x_transformers import Encoder
+
 
 class SlotAE(pl.LightningModule):
 
@@ -22,6 +24,7 @@ class SlotAE(pl.LightningModule):
         loss_fn,
         n_slots=[16, 8],
         ignore_slots=[],
+        slot_encoder=False,
         decode_strategy: str = "random",
         mode: str = "hierarchical",
         optimizer: str = "adamw",
@@ -50,6 +53,17 @@ class SlotAE(pl.LightningModule):
                 build_slot_attention(slot_attention_arch, slot_attention_args)
                 for _ in n_slots
             ]
+        )
+
+        self.slot_encoder = (
+            Encoder(
+                dim=slot_attention_args["slot_dim"],
+                depth=4,
+                ff_glu=True,
+                ff_swish=True,
+            )
+            if slot_encoder
+            else nn.Identity()
         )
 
         self.project_slots = nn.Sequential(
@@ -115,6 +129,7 @@ class SlotAE(pl.LightningModule):
                         slots, attn_map = slot_attention(slots, n_slots=n)
                         attn_map = attn_map[0]
 
+                slots = self.slot_encoder(slots)
                 if n not in self.ignore_slots:
                     slots_dict[n] = self.project_slots(slots)
                 attn_list.append(attn_map)
