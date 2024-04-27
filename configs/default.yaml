@@ -5,7 +5,9 @@ model:
   init_args:
     dim: 384 
     resolution: [224, 224]
-    n_slots: [[9, 8, 7, 6, 5, 4, 3]]
+    n_slots: [[10, 8, 6]]
+    ignore_slots: []
+    slot_encoder: True
     image_encoder_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
     mode: hierarchical
     optimizer: adamw

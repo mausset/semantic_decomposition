@@ -5,7 +5,9 @@ model:
   init_args:
     dim: 768
     resolution: [224, 224]
-    n_slots: 7
+    n_slots: 3
+    n_img_slots: 3
+    n_txt_slots: 3
     font_path: "Arial.ttf"
     optimizer: adamw
     optimizer_args:
@@ -19,7 +21,6 @@ model:
       depth: 1
       n_iters: 5
       implicit: True
-      sample_strategy: prior
     feature_decoder_args:
       dim: ${..dim}
       depth: 4
@@ -35,11 +36,11 @@ data:
 trainer:
   accelerator: mps
   accumulate_grad_batches: 4
-  logger: 
-    class_path: lightning.pytorch.loggers.WandbLogger
-    init_args:
-      project: "align"
-      save_dir: ./lightning_logs
+  # logger: 
+  #   class_path: lightning.pytorch.loggers.WandbLogger
+  #   init_args:
+  #     project: "align"
+  #     save_dir: ./lightning_logs
   val_check_interval: 0.01
   limit_val_batches: 1
   log_every_n_steps: 5

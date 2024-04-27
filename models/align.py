@@ -1,16 +1,12 @@
 import lightning as pl
 import timm
 import torch
-from models.components import SwiGLUFFN
 from models.decoder import TransformerDecoder
 from models.slot_attention import build_slot_attention
-from schedulefree import AdamWScheduleFree
-from torch import nn
 from torch.nn import functional as F
 from torch.optim import AdamW
 from transformers import RobertaModel, RobertaTokenizer
 from utils.plot import plot_alignment
-
 from x_transformers import Encoder
 
 
@@ -24,8 +20,8 @@ class Align(pl.LightningModule):
         feature_decoder_args: dict,
         dim: int,
         resolution: tuple[int, int],
-        n_slots=7,
-        n_img_slots=7,
+        n_slots=3,
+        n_img_slots=3,
         n_txt_slots=3,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -44,6 +40,11 @@ class Align(pl.LightningModule):
             .requires_grad_(False)
         )
 
+        self.text_tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        self.text_encoder = (
+            RobertaModel.from_pretrained("roberta-base").eval().requires_grad_(False)
+        )
+
         self.image_slot_attention = build_slot_attention(
             slot_attention_arch, slot_attention_args
         )
@@ -52,34 +53,22 @@ class Align(pl.LightningModule):
             slot_attention_arch, slot_attention_args
         )
 
-        self.text_tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
-        self.text_encoder = (
-            RobertaModel.from_pretrained("roberta-base").eval().requires_grad_(False)
-        )
-
-        self.project_features_img = nn.Sequential(
-            SwiGLUFFN(dim),
-            nn.LayerNorm(dim),
-        )
-
-        self.project_features_txt = nn.Sequential(
-            SwiGLUFFN(dim),
-            nn.LayerNorm(dim),
-        )
-
-        self.slot_attention = build_slot_attention(
-            slot_attention_arch, slot_attention_args
-        )
-
-        self.slot_encoder = Encoder(
+        self.project_features_img = Encoder(
             dim=dim,
             depth=4,
             ff_glu=True,
             ff_swish=True,
         )
 
-        self.project_slots = nn.Sequential(
-            nn.LayerNorm(dim),
+        self.project_features_txt = Encoder(
+            dim=dim,
+            depth=4,
+            ff_glu=True,
+            ff_swish=True,
+        )
+
+        self.slot_attention = build_slot_attention(
+            slot_attention_arch, slot_attention_args
         )
 
         self.feature_decoder_img = TransformerDecoder(**feature_decoder_args)
@@ -122,33 +111,22 @@ class Align(pl.LightningModule):
         img, txt = x
 
         features_img = self.forward_features_img(img)
-
         slots_img, attn_map_img = self.image_slot_attention(
             features_img, n_slots=self.n_img_slots
         )
-
-        mask_img = torch.ones_like(slots_img[:, :, 0]).bool()
-
+        attn_map_img = attn_map_img[0]
         features_proj_img = self.project_features_img(slots_img)
 
         features_txt, mask_txt, token_ids = self.forward_features_txt(txt)
-
         slots_txt, attn_map_txt = self.text_slot_attention(
             features_txt, n_slots=self.n_txt_slots, mask=mask_txt
         )
-
+        attn_map_txt = attn_map_txt[0]
         features_proj_txt = self.project_features_txt(slots_txt)
 
         features = torch.cat([features_proj_img, features_proj_txt], dim=1)
-        # mask = torch.cat([mask_img, mask_txt], dim=1)
-
-        encoded_features = self.slot_encoder(features)  # , mask=mask)
-
-        slots, attn_map = self.slot_attention(
-            encoded_features, n_slots=self.n_slots  # , mask=mask
-        )
-
-        slots = self.project_slots(slots)
+        slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
+        attn_map = attn_map[0]
 
         recon_features_img, _ = self.feature_decoder_img(
             slots,
@@ -197,9 +175,6 @@ class Align(pl.LightningModule):
         return losses, info
 
     def training_step(self, x):
-        if self.optimizer == "adamw_schedulefree":
-            self.optimizers().train()
-
         losses, _ = self.common_step(x)
 
         for k, v in losses.items():
@@ -211,9 +186,6 @@ class Align(pl.LightningModule):
         return loss
 
     def validation_step(self, x):
-        if self.optimizer == "adamw_schedulefree":
-            self.optimizers().eval()
-
         losses, info = self.common_step(x)
 
         for k, v in losses.items():
@@ -230,14 +202,16 @@ class Align(pl.LightningModule):
             font_path=self.font_path,
         )
 
-        self.logger.log_image(
-            key="attention",
-            images=[fig],
-        )
+        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger):
+            self.logger.log_image(
+                key="attention",
+                images=[fig],
+            )
+
         return loss
 
     def configure_optimizers(self):
         if self.optimizer == "adamw":
             return AdamW(self.parameters(), **self.optimizer_args)
-        elif self.optimizer == "adamw_schedulefree":
-            return AdamWScheduleFree(self.parameters(), **self.optimizer_args)
+        else:
+            raise NotImplementedError
