@@ -23,6 +23,7 @@ class Align(pl.LightningModule):
         n_slots=3,
         n_img_slots=3,
         n_txt_slots=3,
+        direct_decode=False,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
         font_path: str = "Arial.ttf",
@@ -87,6 +88,7 @@ class Align(pl.LightningModule):
         self.n_slots = n_slots
         self.n_img_slots = n_img_slots
         self.n_txt_slots = n_txt_slots
+        self.direct_decode = direct_decode
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
         self.font_path = font_path
@@ -128,18 +130,18 @@ class Align(pl.LightningModule):
         slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
         attn_map = attn_map[0]
 
-        recon_features_img, _ = self.feature_decoder_img(
+        recon_features_img, attn_map_img = self.feature_decoder_img(
             slots,
             self.img_feature_resolution,
         )
 
+        features_txt = features_txt * mask_txt.unsqueeze(-1)
         text_resolution = (1, features_txt.size(1))
-        recon_features_txt, _ = self.feature_decoder_txt(
+
+        recon_features_txt, attn_map_txt = self.feature_decoder_txt(
             slots, text_resolution, mask=mask_txt
         )
-
         recon_features_txt = recon_features_txt * mask_txt.unsqueeze(-1)
-        features_txt = features_txt * mask_txt.unsqueeze(-1)
 
         loss_txt = (
             self.loss_fn(recon_features_txt, features_txt, reduction="none")
@@ -148,10 +150,38 @@ class Align(pl.LightningModule):
             / mask_txt.sum(-1)
         ).mean()
 
+        if self.direct_decode:
+            recon_features_img_direct, _ = self.feature_decoder_img(
+                slots_img,
+                self.img_feature_resolution,
+            )
+
+            recon_features_txt_direct, _ = self.feature_decoder_txt(
+                slots_txt, text_resolution, mask=mask_txt
+            )
+            recon_features_txt_direct = recon_features_txt_direct * mask_txt.unsqueeze(
+                -1
+            )
+
+            loss_txt_direct = (
+                self.loss_fn(recon_features_txt_direct, features_txt, reduction="none")
+                .mean(-1)
+                .sum(dim=-1)
+                / mask_txt.sum(-1)
+            ).mean()
+
         losses = {
             "img": self.loss_fn(recon_features_img, features_img),
             "txt": loss_txt,
         }
+
+        if self.direct_decode:
+            losses.update(
+                {
+                    "img_direct": self.loss_fn(recon_features_img_direct, features_img),
+                    "txt_direct": loss_txt_direct,
+                }
+            )
 
         attn_map_img = attn_map_img @ attn_map[:, : features_proj_img.size(1)]
         attn_map_txt = attn_map_txt @ attn_map[:, features_proj_img.size(1) :]

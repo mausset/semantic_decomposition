@@ -9,6 +9,7 @@ model:
     n_img_slots: 3
     n_txt_slots: 3
     font_path: "Arial.ttf"
+    direct_decode: True
     optimizer: adamw
     optimizer_args:
       lr: 2e-4
@@ -30,7 +31,7 @@ data:
   init_args:
     root_dir: ./data/coco
     num_workers: 7
-    batch_size: 16
+    batch_size: 8
     resolution: 224
 
 trainer:
