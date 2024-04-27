@@ -130,7 +130,7 @@ class Align(pl.LightningModule):
         slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
         attn_map = attn_map[0]
 
-        recon_features_img, attn_map_img = self.feature_decoder_img(
+        recon_features_img, _ = self.feature_decoder_img(
             slots,
             self.img_feature_resolution,
         )
@@ -138,7 +138,7 @@ class Align(pl.LightningModule):
         features_txt = features_txt * mask_txt.unsqueeze(-1)
         text_resolution = (1, features_txt.size(1))
 
-        recon_features_txt, attn_map_txt = self.feature_decoder_txt(
+        recon_features_txt, _ = self.feature_decoder_txt(
             slots, text_resolution, mask=mask_txt
         )
         recon_features_txt = recon_features_txt * mask_txt.unsqueeze(-1)
