@@ -54,16 +54,9 @@ class Align(pl.LightningModule):
             slot_attention_arch, slot_attention_args
         )
 
-        self.project_features_img = Encoder(
+        self.slot_encoder = Encoder(
             dim=dim,
-            depth=4,
-            ff_glu=True,
-            ff_swish=True,
-        )
-
-        self.project_features_txt = Encoder(
-            dim=dim,
-            depth=4,
+            depth=8,
             ff_glu=True,
             ff_swish=True,
         )
@@ -117,16 +110,16 @@ class Align(pl.LightningModule):
             features_img, n_slots=self.n_img_slots
         )
         attn_map_img = attn_map_img[0]
-        features_proj_img = self.project_features_img(slots_img)
 
         features_txt, mask_txt, token_ids = self.forward_features_txt(txt)
         slots_txt, attn_map_txt = self.text_slot_attention(
             features_txt, n_slots=self.n_txt_slots, mask=mask_txt
         )
         attn_map_txt = attn_map_txt[0]
-        features_proj_txt = self.project_features_txt(slots_txt)
 
-        features = torch.cat([features_proj_img, features_proj_txt], dim=1)
+        features = torch.cat([slots_img, slots_txt], dim=1)
+        features = self.slot_encoder(features)
+
         slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
         attn_map = attn_map[0]
 
@@ -183,8 +176,8 @@ class Align(pl.LightningModule):
                 }
             )
 
-        attn_map_img = attn_map_img @ attn_map[:, : features_proj_img.size(1)]
-        attn_map_txt = attn_map_txt @ attn_map[:, features_proj_img.size(1) :]
+        attn_map_img = attn_map_img @ attn_map[:, : slots_img.size(1)]
+        attn_map_txt = attn_map_txt @ attn_map[:, slots_img.size(1) :]
 
         tokens_txt = [
             self.text_tokenizer.convert_ids_to_tokens(ids.tolist()) for ids in token_ids
