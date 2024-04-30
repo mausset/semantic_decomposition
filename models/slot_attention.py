@@ -150,12 +150,23 @@ class SAT(nn.Module):
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=ica_bias)
         self.inv_cross_q = nn.Linear(slot_dim, slot_dim, bias=ica_bias)
 
-        self.t_encoder = Encoder(
-            dim=slot_dim,
-            depth=depth,
-            ff_glu=True,
-            ff_swish=True,
+        self.t_encoder = nn.ModuleList(
+            [
+                Encoder(
+                    dim=slot_dim,
+                    depth=1,
+                    ff_glu=True,
+                    ff_swish=True,
+                )
+                for _ in range(depth)
+            ]
         )
+        # self.t_encoder = Encoder(
+        #     dim=slot_dim,
+        #     depth=depth,
+        #     ff_glu=True,
+        #     ff_swish=True,
+        # )
 
         self.norm_input = nn.LayerNorm(slot_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
@@ -189,19 +200,20 @@ class SAT(nn.Module):
 
     def step(self, slots, k, v, return_attn=False, mask=None):
 
-        q = self.inv_cross_q(self.norm_slots(slots))
+        for t_encoder in self.t_encoder:
+            q = self.inv_cross_q(self.norm_slots(slots))
 
-        updates_attn = [self.inv_cross_attn(q, ki, vi) for ki, vi in zip(k, v)]
+            updates_attn = [self.inv_cross_attn(q, ki, vi) for ki, vi in zip(k, v)]
 
-        updates = [ui for ui, _ in updates_attn]
-        attn = [attn for _, attn in updates_attn]
+            updates = [ui for ui, _ in updates_attn]
+            attn = [attn for _, attn in updates_attn]
 
-        updates = torch.stack(updates, dim=0).mean(dim=0)
+            updates = torch.stack(updates, dim=0).mean(dim=0)
 
-        slots = slots + updates
-        slots = self.norm_ica(slots)
+            slots = slots + updates
+            slots = self.norm_ica(slots)
 
-        slots = self.t_encoder(slots)
+            slots = t_encoder(slots)
 
         if return_attn:
             return slots, attn
