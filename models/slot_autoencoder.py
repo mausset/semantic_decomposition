@@ -24,7 +24,7 @@ class SlotAE(pl.LightningModule):
         loss_fn,
         n_slots=[16, 8],
         ignore_decode_slots=[],
-        slot_encoder=False,
+        slot_encoder=4,
         decode_strategy: str = "random",
         mode: str = "hierarchical",
         optimizer: str = "adamw",
@@ -58,7 +58,7 @@ class SlotAE(pl.LightningModule):
         self.slot_encoder = (
             Encoder(
                 dim=slot_attention_args["slot_dim"],
-                depth=4,
+                depth=slot_encoder,
                 ff_glu=True,
                 ff_swish=True,
             )
