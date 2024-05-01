@@ -129,9 +129,10 @@ class SlotAE(pl.LightningModule):
                         slots, attn_map = slot_attention(slots, n_slots=n)
                         attn_map = attn_map[0]
 
-                slots = self.slot_encoder(slots)
                 if n not in self.ignore_decode_slots:
                     slots_dict[n] = self.project_slots(slots)
+
+                slots = self.slot_encoder(slots)
                 attn_list.append(attn_map)
 
         losses = {}
