@@ -69,6 +69,13 @@ class TransformerDecoder(pl.LightningModule):
             ff_swish=True,
         )
 
+    def make_scaffold(self, x, resolution):
+        b, _, _ = x.shape
+        grid = make_grid(resolution, x.device)
+        grid = repeat(grid, "h w d -> b (h w) d", b=b)
+        scaffold = self.pos_enc(grid)
+        return scaffold
+
     def forward(self, x, resolution, mask=None, context_mask=None):
         """
         args:
@@ -77,12 +84,8 @@ class TransformerDecoder(pl.LightningModule):
             (B, HW, D), decoded features
             (B, HW, N), cross-attention map
         """
-        b, _, _ = x.shape
 
-        grid = make_grid(resolution, device=x.device)
-        grid = repeat(grid, "h w d -> b (h w) d", b=b)
-
-        scaffold = self.pos_enc(grid)
+        scaffold = self.make_scaffold(x, resolution)
 
         result, hiddens = self.transformer(
             scaffold,
