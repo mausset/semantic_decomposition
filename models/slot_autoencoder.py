@@ -6,7 +6,7 @@ from models.slot_attention import build_slot_attention
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
-from utils.helpers import compute_combined_attn, pad_batched_slots
+from utils.helpers import pad_batched_slots
 
 from x_transformers import Encoder
 
@@ -23,7 +23,6 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
-        ignore_decode_slots=[],
         slot_encoder=4,
         decode_strategy: str = "random",
         mode: str = "hierarchical",
@@ -55,17 +54,6 @@ class SlotAE(pl.LightningModule):
             ]
         )
 
-        self.slot_encoder = (
-            Encoder(
-                dim=slot_attention_args["slot_dim"],
-                depth=slot_encoder,
-                ff_glu=True,
-                ff_swish=True,
-            )
-            if slot_encoder
-            else nn.Identity()
-        )
-
         self.project_slots = nn.Sequential(
             nn.Linear(slot_attention_args["slot_dim"], dim),
             nn.LayerNorm(dim),
@@ -85,7 +73,6 @@ class SlotAE(pl.LightningModule):
         )
         self.loss_fn = loss_fn
         self.n_slots = n_slots
-        self.ignore_decode_slots = ignore_decode_slots
         self.decode_strategy = decode_strategy
         self.mode = mode
         self.optimizer = optimizer
@@ -101,7 +88,6 @@ class SlotAE(pl.LightningModule):
         slots = self.project_features(features)
 
         attn_list = []
-        slots_list = [features]
         slots_dict = {}
         for n_slots, slot_attention in zip(self.n_slots, self.slot_attention):
             if isinstance(n_slots, int):
@@ -112,25 +98,15 @@ class SlotAE(pl.LightningModule):
                 match self.mode:
                     case "hierarchical":
                         slots, attn_map = slot_attention(slots, n_slots=n)
-                        attn_map = attn_map[0]
+                        attn_map = attn_map
                         if attn_list:
                             attn_map = attn_list[-1] @ attn_map
-                    case "multi_scale":
-                        slots, attn_maps = slot_attention(slots_list, n_slots=n)
-                        slots_list.append(slots)
-                        attn_map = compute_combined_attn(attn_list, attn_maps)
-                    case "propagate":
-                        prev_attn = attn_list[-1] if attn_list else None
-                        slots, attn_map = slot_attention(
-                            features, slots, prev_attn, n_slots=n
-                        )
                     case "flat":
                         slots = features
                         slots, attn_map = slot_attention(slots, n_slots=n)
-                        attn_map = attn_map[0]
+                        attn_map = attn_map
 
-                if n not in self.ignore_decode_slots:
-                    slots_dict[n] = self.project_slots(self.slot_encoder(slots))
+                slots_dict[n] = self.project_slots(slots)
 
                 attn_list.append(attn_map)
 
