@@ -23,7 +23,6 @@ class SlotAE(pl.LightningModule):
         resolution: tuple[int, int],
         loss_fn,
         n_slots=[16, 8],
-        slot_encoder=4,
         decode_strategy: str = "random",
         mode: str = "hierarchical",
         optimizer: str = "adamw",
