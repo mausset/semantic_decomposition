@@ -45,7 +45,14 @@ class Interpreter(pl.LightningModule):
             nn.LayerNorm(slot_attention_args["input_dim"]),
         )
 
-        if not weight_share:
+        if weight_share:
+            self.slot_attention = [
+                build_slot_attention(slot_attention_arch, slot_attention_args)
+            ] * len(n_slots)
+            self.slot_decoder = [TransformerDecoder(**feature_decoder_args)] * len(
+                n_slots
+            )
+        else:
             self.slot_attention = nn.ModuleList(
                 [
                     build_slot_attention(slot_attention_arch, slot_attention_args)
@@ -55,13 +62,6 @@ class Interpreter(pl.LightningModule):
 
             self.slot_decoder = nn.ModuleList(
                 [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
-            )
-        else:
-            self.slot_attention = [
-                build_slot_attention(slot_attention_arch, slot_attention_args)
-            ] * len(n_slots)
-            self.slot_decoder = [TransformerDecoder(**feature_decoder_args)] * len(
-                n_slots
             )
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -98,6 +98,8 @@ class Interpreter(pl.LightningModule):
         for n, slot_attention, slot_decoder in zip(
             self.n_slots, self.slot_attention, self.slot_decoder
         ):
+            if n != self.n_slots[0]:
+                slots = slots + slot_decoder.make_scaffold(slots, res)
 
             slots, attn_map = slot_attention(slots, n_slots=n)
             if attn_list:
@@ -105,13 +107,12 @@ class Interpreter(pl.LightningModule):
             attn_list.append(attn_map)
 
             decoded_slots, _ = slot_decoder(slots, res)
-
-            res = (1, attn_map.shape[2])
-            slots = slots + slot_decoder.make_scaffold(slots, res)
             if self.detach_slots:
                 slots = slots.detach()
             slots_list.append(slots)
             decoded_slots_list.append(decoded_slots)
+
+            res = (1, attn_map.shape[2])
 
         losses = {}
 
