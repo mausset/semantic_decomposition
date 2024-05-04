@@ -5,6 +5,25 @@ from torch.nn import functional as F
 from einops import repeat
 
 
+class GaussianPrior(nn.Module):
+
+    def __init__(self, dim):
+        super().__init__()
+        self.init_mu = nn.Parameter(torch.randn(dim))
+        init_log_sigma = torch.empty((1, 1, dim))
+        nn.init.xavier_uniform_(init_log_sigma)
+        self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+
+    def forward(self, x, n):
+        b, _, _ = x.shape
+
+        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n)
+        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n)
+        sample = mu + log_sigma.exp() * torch.randn_like(mu)
+
+        return sample
+
+
 class SwiGLUFFN(nn.Module):
 
     def __init__(self, dim, expansion_factor=4):

@@ -3,6 +3,7 @@ from einops import repeat
 from torch import nn
 from torch.nn import functional as F
 from utils.pos_enc import FourierPositionalEncoding, make_grid
+from models.components import GaussianPrior
 from x_transformers import Encoder
 
 
@@ -53,13 +54,15 @@ class MLPDecoder(pl.LightningModule):
 
 class TransformerDecoder(pl.LightningModule):
 
-    def __init__(self, dim, depth) -> None:
+    def __init__(self, dim, depth, include_prior=False) -> None:
         super().__init__()
 
         self.dim = dim
         self.depth = depth
 
         self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
+        if include_prior:
+            self.prior = GaussianPrior(dim)
 
         self.transformer = Encoder(
             dim=dim,
@@ -76,7 +79,7 @@ class TransformerDecoder(pl.LightningModule):
         scaffold = self.pos_enc(grid)
         return scaffold
 
-    def forward(self, x, resolution, mask=None, context_mask=None):
+    def forward(self, x, resolution, sample=False, mask=None, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -85,10 +88,14 @@ class TransformerDecoder(pl.LightningModule):
             (B, HW, N), cross-attention map
         """
 
-        scaffold = self.make_scaffold(x, resolution)
+        if sample and self.prior is not None:
+            # Resolution should be an integer if sample is True
+            target = self.prior(x, resolution)
+        else:
+            target = self.make_scaffold(x, resolution)
 
         result, hiddens = self.transformer(
-            scaffold,
+            target,
             mask=mask,
             context=x,
             context_mask=context_mask,
