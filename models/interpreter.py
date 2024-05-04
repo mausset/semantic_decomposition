@@ -84,8 +84,8 @@ class Interpreter(pl.LightningModule):
 
         for i in range(len(self.n_slots) - 1, 0, -1):
             slots = slots_list[i]
-            res = slots_list[i - 1].shape[1]
-            decoded, _ = self.decoder(slots, res, sample=True)
+            res = (1, slots_list[i - 1].shape[1])
+            decoded, _ = self.decoder(slots, res, sample=False)
             slots_list[i - 1] = torch.cat([slots_list[i - 1], decoded], dim=0)
 
         decoded_features, _ = self.decoder(slots_list[0], self.feature_resolution)
