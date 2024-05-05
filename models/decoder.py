@@ -53,7 +53,7 @@ class MLPDecoder(pl.LightningModule):
 
 class TransformerDecoder(pl.LightningModule):
 
-    def __init__(self, dim, depth, include_prior=False) -> None:
+    def __init__(self, dim, depth) -> None:
         super().__init__()
 
         self.dim = dim
