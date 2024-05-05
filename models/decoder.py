@@ -2,8 +2,7 @@ import lightning as pl
 from einops import repeat
 from torch import nn
 from torch.nn import functional as F
-from utils.pos_enc import FourierPositionalEncoding, make_grid
-from models.components import GaussianPrior
+from models.positional_encoding import FourierScaffold
 from x_transformers import Encoder
 
 
@@ -16,7 +15,7 @@ class MLPDecoder(pl.LightningModule):
         self.depth = depth
         self.resolution = resolution
 
-        self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
+        self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
 
         mlp = []
         for i in range(depth - 1):
@@ -37,7 +36,7 @@ class MLPDecoder(pl.LightningModule):
             (B, H, W), predicted masks
         """
 
-        grid = make_grid(self.resolution, device=x.device)
+        grid = self.pos_enc(self.resolution, device=x.device)
         grid = repeat(grid, "b h w d -> (b r) n h w d", r=x.shape[0], n=x.shape[1])
 
         scaffold = self.pos_enc(grid)
@@ -60,9 +59,7 @@ class TransformerDecoder(pl.LightningModule):
         self.dim = dim
         self.depth = depth
 
-        self.pos_enc = FourierPositionalEncoding(in_dim=2, out_dim=dim)
-        if include_prior:
-            self.prior = GaussianPrior(dim)
+        self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
 
         self.transformer = Encoder(
             dim=dim,
@@ -72,14 +69,7 @@ class TransformerDecoder(pl.LightningModule):
             ff_swish=True,
         )
 
-    def make_scaffold(self, x, resolution):
-        b, _, _ = x.shape
-        grid = make_grid(resolution, x.device)
-        grid = repeat(grid, "h w d -> b (h w) d", b=b)
-        scaffold = self.pos_enc(grid)
-        return scaffold
-
-    def forward(self, x, resolution, sample=False, mask=None, context_mask=None):
+    def forward(self, x, resolution, mask=None, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -88,11 +78,7 @@ class TransformerDecoder(pl.LightningModule):
             (B, HW, N), cross-attention map
         """
 
-        if sample and self.prior is not None:
-            # Resolution should be an integer if sample is True
-            target = self.prior(x, resolution)
-        else:
-            target = self.make_scaffold(x, resolution)
+        target = self.pos_enc(x, resolution)
 
         result, hiddens = self.transformer(
             target,

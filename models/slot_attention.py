@@ -4,7 +4,8 @@ from einops import rearrange, repeat
 from torch import nn
 from x_transformers import Encoder
 
-from models.components import SwiGLUFFN
+from models.components import SwiGLUFFN, GaussianPrior
+from models.positional_encoding import FourierScaffold
 
 
 def build_slot_attention(arch: str, args):
@@ -127,6 +128,7 @@ class SAT(nn.Module):
         n_iters=3,
         implicit=False,
         depth=1,
+        sample_strategy="gaussian",
         ica_bias=False,
         eps=1e-8,
     ):
@@ -134,15 +136,16 @@ class SAT(nn.Module):
         self.in_dim = input_dim
         self.slot_dim = slot_dim
         self.n_iters = n_iters
+        self.sample_strategy = sample_strategy
         self.implicit = implicit
         self.eps = eps
 
         self.scale = input_dim**-0.5
 
-        self.init_mu = nn.Parameter(torch.randn(slot_dim))
-        init_log_sigma = torch.empty((1, 1, slot_dim))
-        nn.init.xavier_uniform_(init_log_sigma)
-        self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+        if sample_strategy == "gaussian":
+            self.sampler = GaussianPrior(slot_dim)
+        elif sample_strategy == "spatial":
+            self.sampler = FourierScaffold(in_dim=2, out_dim=slot_dim)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=ica_bias)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=ica_bias)
@@ -160,27 +163,20 @@ class SAT(nn.Module):
         self.norm_ica = nn.LayerNorm(slot_dim)
 
     def sample(self, x, n_slots):
-        b, _, _ = x.shape
 
-        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
-        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
+        if self.sample_strategy == "spatial":
+            n_slots = (1, n_slots)
 
-        sample = mu + log_sigma.exp() * torch.randn_like(mu)
-
-        return sample
+        return self.sampler(x, n_slots)
 
     def inv_cross_attn(self, q, k, v, mask=None):
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
-
         if mask is not None:
             # NOTE: Masking attention is sensitive to the chosen value
             dots.masked_fill_(~mask[:, None, :], -torch.finfo(k.dtype).max)
-
         attn = dots.softmax(dim=1) + self.eps
-
         attn = attn / attn.sum(dim=-1, keepdim=True)
-
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
         return updates, attn
@@ -188,7 +184,6 @@ class SAT(nn.Module):
     def step(self, slots, k, v, return_attn=False, mask=None):
 
         q = self.inv_cross_q(self.norm_slots(slots))
-
         updates, attn = self.inv_cross_attn(q, k, v, mask=mask)
 
         slots = slots + updates
