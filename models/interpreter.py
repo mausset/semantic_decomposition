@@ -21,7 +21,7 @@ class Interpreter(pl.LightningModule):
         dim: int,
         resolution: tuple[int, int],
         loss_strategy: str,
-        share_pos_enc: bool = False,
+        share_pos_enc=(False, True),
         n_slots=[16, 8],
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -38,10 +38,11 @@ class Interpreter(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
+        self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
 
-        if share_pos_enc:
-            self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
+        if share_pos_enc[0]:
             slot_attention_args["sampler"] = self.pos_enc
+        if share_pos_enc[1]:
             feature_decoder_args["pos_enc"] = self.pos_enc
 
         self.slot_attention = build_slot_attention(
@@ -92,6 +93,7 @@ class Interpreter(pl.LightningModule):
             for n, chunk in zip(self.n_slots, decoded_chunked):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
+
         if self.loss_strategy == "local":
             for k, v in down.items():
                 loss = self.loss_fn(v, up[v.shape[1]])
@@ -112,8 +114,8 @@ class Interpreter(pl.LightningModule):
         coords_list = []
         coords = None
         for n in self.n_slots:
-            if self.share_pos_enc:
-                coords_list.append(self.sample_coordinates(slots, n))
+            coords_list.append(self.sample_coordinates(slots, n))
+            if self.share_pos_enc[0]:
                 coords = coords_list[-1]
             slots, attn_map = self.slot_attention(slots, n_slots=n, sample=coords)
             if attn_list:
@@ -125,7 +127,7 @@ class Interpreter(pl.LightningModule):
         for i in range(len(self.n_slots) - 1, 0, -1):
             slots = slots_list[i]
             res = (1, slots_list[i - 1].shape[1])
-            if self.share_pos_enc:
+            if self.share_pos_enc[1]:
                 coords = coords_list[i - 1]
                 coords = repeat(
                     coords, "b n d -> (r b) n d", r=slots.shape[0] // coords.shape[0]
