@@ -5,7 +5,6 @@ from torch import nn
 from x_transformers import Encoder
 
 from models.components import SwiGLUFFN, GaussianPrior
-from models.positional_encoding import FourierScaffold
 
 
 def build_slot_attention(arch: str, args):
@@ -128,7 +127,7 @@ class SAT(nn.Module):
         n_iters=3,
         implicit=False,
         depth=1,
-        sample_strategy="gaussian",
+        sampler="gaussian",
         ica_bias=False,
         eps=1e-8,
     ):
@@ -136,16 +135,15 @@ class SAT(nn.Module):
         self.in_dim = input_dim
         self.slot_dim = slot_dim
         self.n_iters = n_iters
-        self.sample_strategy = sample_strategy
         self.implicit = implicit
         self.eps = eps
 
         self.scale = input_dim**-0.5
 
-        if sample_strategy == "gaussian":
+        if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
-        elif sample_strategy == "spatial":
-            self.sampler = FourierScaffold(in_dim=2, out_dim=slot_dim)
+        else:
+            self.sampler = sampler
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=ica_bias)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=ica_bias)
@@ -162,12 +160,9 @@ class SAT(nn.Module):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_ica = nn.LayerNorm(slot_dim)
 
-    def sample(self, x, n_slots):
+    def sample(self, x, n_slots, sample=None):
 
-        if self.sample_strategy == "spatial":
-            n_slots = (1, n_slots)
-
-        return self.sampler(x, n_slots)
+        return self.sampler(x, n_slots, sample=sample)
 
     def inv_cross_attn(self, q, k, v, mask=None):
 
@@ -196,11 +191,11 @@ class SAT(nn.Module):
 
         return slots
 
-    def forward(self, x, n_slots=8, mask=None):
+    def forward(self, x, n_slots=8, mask=None, sample=None):
 
         x = self.norm_input(x)
 
-        init_slots = self.sample(x, n_slots)
+        init_slots = self.sample(x, n_slots, sample=sample)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)

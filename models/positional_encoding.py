@@ -64,9 +64,12 @@ class FourierScaffold(nn.Module):
         )
         return grid
 
-    def forward(self, x, resolution):
+    def forward(self, x, resolution, sample=None):
         b, _, _ = x.shape
-        grid = self.make_grid(resolution, x.device)
-        grid = repeat(grid, "h w d -> b (h w) d", b=b)
+        if sample is None:
+            grid = self.make_grid(resolution, x.device)
+            grid = repeat(grid, "h w d -> b (h w) d", b=b)
+        else:
+            grid = sample
         scaffold = self.pos_enc(grid)
         return scaffold

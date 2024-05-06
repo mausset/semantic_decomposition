@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torch.linalg import eigh
 from torch.nn import functional as F
 from einops import repeat
 
@@ -14,12 +13,15 @@ class GaussianPrior(nn.Module):
         nn.init.xavier_uniform_(init_log_sigma)
         self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
 
-    def forward(self, x, n):
+    def forward(self, x, n, sample=None):
         b, _, _ = x.shape
 
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n)
         log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n)
-        sample = mu + log_sigma.exp() * torch.randn_like(mu)
+        if sample is None:
+            sample = mu + log_sigma.exp() * torch.randn_like(mu)
+        else:
+            sample = mu + sample * log_sigma.exp()
 
         return sample
 
