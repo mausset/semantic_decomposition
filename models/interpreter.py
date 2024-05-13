@@ -6,6 +6,7 @@ from models.positional_encoding import FourierScaffold
 from models.slot_attention import build_slot_attention
 from torch.optim import AdamW
 from utils.plot import plot_attention_hierarchical
+from utils.helpers import pad_batched_slots
 
 from einops import repeat
 
@@ -21,6 +22,7 @@ class Interpreter(pl.LightningModule):
         dim: int,
         resolution: tuple[int, int],
         loss_strategy: str,
+        decode_strategy: str,
         share_pos_enc=(False, True),
         n_slots=[16, 8],
         optimizer: str = "adamw",
@@ -61,6 +63,7 @@ class Interpreter(pl.LightningModule):
         )
         self.loss_fn = torch.nn.MSELoss()
         self.loss_strategy = loss_strategy
+        self.decode_strategy = decode_strategy
 
         self.share_pos_enc = share_pos_enc
         self.n_slots = n_slots
@@ -101,45 +104,58 @@ class Interpreter(pl.LightningModule):
 
         return losses
 
+    def decode(self, slots_list):
+
+        down = {}
+
+        if self.decode_strategy == "flat":
+            slots_dict = {n: slots for n, slots in zip(self.n_slots, slots_list)}
+
+            slots, mask = pad_batched_slots(slots_dict)
+
+            decoded, _ = self.decoder(
+                slots,
+                resolution=self.feature_resolution,
+                context_mask=mask,
+            )
+
+            down[self.n_slots[0]] = decoded
+
+        if self.decode_strategy == "hierarchical":
+            for i in range(len(self.n_slots) - 1, 0, -1):
+                slots = slots_list[i]
+                res = (1, slots_list[i - 1].shape[1])
+                decoded, _ = self.decoder(
+                    slots,
+                    resolution=res,
+                )
+                down[self.n_slots[i]] = decoded
+                if self.loss_strategy == "anchored":
+                    slots_list[i - 1] = torch.cat([slots_list[i - 1], decoded], dim=0)
+
+            decoded, _ = self.decoder(slots_list[0], self.feature_resolution)
+            down[self.n_slots[0]] = decoded
+
+        return down
+
     def common_step(self, x):
 
         features = self.forward_features(x)
         slots = features
 
         up = {slots.shape[1]: slots}
-        down = {}
 
         attn_list = []
         slots_list = []
-        coords_list = []
-        coords = None
         for n in self.n_slots:
-            coords_list.append(self.sample_coordinates(slots, n))
-            if self.share_pos_enc[0]:
-                coords = coords_list[-1]
-            slots, attn_map = self.slot_attention(slots, n_slots=n, sample=coords)
+            slots, attn_map = self.slot_attention(slots, n_slots=n)
             if attn_list:
                 attn_map = attn_list[-1] @ attn_map
             attn_list.append(attn_map)
             slots_list.append(slots)
             up[n] = slots
 
-        for i in range(len(self.n_slots) - 1, 0, -1):
-            slots = slots_list[i]
-            res = (1, slots_list[i - 1].shape[1])
-            if self.share_pos_enc[1]:
-                coords = coords_list[i - 1]
-                coords = repeat(
-                    coords, "b n d -> (r b) n d", r=slots.shape[0] // coords.shape[0]
-                )
-            decoded, _ = self.decoder(slots, resolution=res, sample=coords)
-            down[self.n_slots[i]] = decoded
-            if self.loss_strategy == "anchored":
-                slots_list[i - 1] = torch.cat([slots_list[i - 1], decoded], dim=0)
-
-        decoded, _ = self.decoder(slots_list[0], self.feature_resolution)
-        down[self.n_slots[0]] = decoded
-
+        down = self.decode(slots_list)
         losses = self.calculate_loss(up, down)
 
         return losses, attn_list
