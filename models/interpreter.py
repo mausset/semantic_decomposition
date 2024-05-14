@@ -165,11 +165,14 @@ class Interpreter(pl.LightningModule):
 
         if self.loss_strategy == "local":
             for k, v in down.items():
+                target = (
+                    up[v.shape[1]].detach() if self.detach_slots else up[v.shape[1]]
+                )
                 if k == self.n_slots[0]:
-                    loss = self.loss_fn(v, up[v.shape[1]])
+                    loss = self.loss_fn(v, target)
                     losses[k] = loss
                     continue
-                loss = self.internal_loss_fn(v, up[v.shape[1]]).mean()
+                loss = self.internal_loss_fn(v, target).mean()
                 losses[k] = loss
 
         return losses
