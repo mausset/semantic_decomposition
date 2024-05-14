@@ -192,8 +192,8 @@ class Interpreter(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"train/loss_{k}", v, prog_bar=True, sync_dist=True)
 
-        # loss = torch.stack(list(losses.values())).mean()
-        loss = torch.stack(list(losses.values())).sum()
+        loss = torch.stack(list(losses.values())).mean()
+        # loss = torch.stack(list(losses.values())).sum()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
 
         return loss
@@ -204,8 +204,8 @@ class Interpreter(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v, sync_dist=True)
 
-        # loss = torch.stack(list(losses.values())).mean()
-        loss = torch.stack(list(losses.values())).sum()
+        loss = torch.stack(list(losses.values())).mean()
+        # loss = torch.stack(list(losses.values())).sum()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
         attention_plot = plot_attention_hierarchical(
