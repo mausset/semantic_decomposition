@@ -1,14 +1,13 @@
 import lightning as pl
 import timm
 import torch
+from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder
 from models.positional_encoding import FourierScaffold
 from models.slot_attention import build_slot_attention
 from torch.optim import AdamW
-from utils.plot import plot_attention_hierarchical
 from utils.helpers import pad_batched_slots
-
-from einops import repeat
+from utils.plot import plot_attention_hierarchical
 
 
 class Interpreter(pl.LightningModule):
@@ -25,6 +24,7 @@ class Interpreter(pl.LightningModule):
         decode_strategy: str,
         share_pos_enc=(False, True),
         n_slots=[16, 8],
+        detach_slots=False,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -40,12 +40,6 @@ class Interpreter(pl.LightningModule):
             .eval()
             .requires_grad_(False)
         )
-        self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
-
-        if share_pos_enc[0]:
-            slot_attention_args["sampler"] = self.pos_enc
-        if share_pos_enc[1]:
-            feature_decoder_args["pos_enc"] = self.pos_enc
 
         self.slot_attention = build_slot_attention(
             slot_attention_arch, slot_attention_args
@@ -62,11 +56,13 @@ class Interpreter(pl.LightningModule):
             self.resolution[1] // self.patch_size,
         )
         self.loss_fn = torch.nn.MSELoss()
+        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.1)
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
         self.share_pos_enc = share_pos_enc
         self.n_slots = n_slots
+        self.detach_slots = detach_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
 
@@ -77,32 +73,23 @@ class Interpreter(pl.LightningModule):
     def sample_coordinates(self, x, n_slots):
         return torch.rand(x.shape[0], n_slots, 2, device=x.device)
 
-    def calculate_loss(self, up, down):
-        """
-        args:
-            up: dict, up features
-            down: dict, down features
+    def encode(self, x):
+        slots = x
 
-        returns:
-            loss, dict
-        """
+        up = {slots.shape[1]: slots}
+        attn_list = []
+        slots_list = []
+        for n in self.n_slots:
+            slots, attn_map = self.slot_attention(slots, n_slots=n)
+            if attn_list:
+                attn_map = attn_list[-1] @ attn_map
+            if self.detach_slots:
+                slots = slots.detach()
+            attn_list.append(attn_map)
+            slots_list.append(slots)
+            up[n] = slots
 
-        losses = {}
-        if self.loss_strategy == "anchored":
-            decoded_features = down[self.n_slots[0]]
-            features = up[decoded_features.shape[1]]
-            decoded_chunked = torch.chunk(decoded_features, len(self.n_slots), dim=0)
-
-            for n, chunk in zip(self.n_slots, decoded_chunked):
-                loss = self.loss_fn(chunk, features)
-                losses[n] = loss
-
-        if self.loss_strategy == "local":
-            for k, v in down.items():
-                loss = self.loss_fn(v, up[v.shape[1]])
-                losses[k] = loss
-
-        return losses
+        return up, slots_list, attn_list
 
     def decode(self, slots_list):
 
@@ -138,22 +125,42 @@ class Interpreter(pl.LightningModule):
 
         return down
 
+    def calculate_loss(self, up, down):
+        """
+        args:
+            up: dict, up features
+            down: dict, down features
+
+        returns:
+            loss, dict
+        """
+
+        losses = {}
+        if self.loss_strategy == "anchored":
+            decoded_features = down[self.n_slots[0]]
+            features = up[decoded_features.shape[1]]
+            decoded_chunked = torch.chunk(decoded_features, len(self.n_slots), dim=0)
+
+            for n, chunk in zip(self.n_slots, decoded_chunked):
+                loss = self.loss_fn(chunk, features)
+                losses[n] = loss
+
+        if self.loss_strategy == "local":
+            for k, v in down.items():
+                if k == self.n_slots[0]:
+                    loss = self.loss_fn(v, up[v.shape[1]])
+                    losses[k] = loss
+                    continue
+                loss = self.internal_loss_fn(v, up[v.shape[1]]).mean()
+                losses[k] = loss
+
+        return losses
+
     def common_step(self, x):
 
         features = self.forward_features(x)
-        slots = features
 
-        up = {slots.shape[1]: slots}
-
-        attn_list = []
-        slots_list = []
-        for n in self.n_slots:
-            slots, attn_map = self.slot_attention(slots, n_slots=n)
-            if attn_list:
-                attn_map = attn_list[-1] @ attn_map
-            attn_list.append(attn_map)
-            slots_list.append(slots)
-            up[n] = slots
+        up, slots_list, attn_list = self.encode(features)
 
         down = self.decode(slots_list)
         losses = self.calculate_loss(up, down)
@@ -166,7 +173,8 @@ class Interpreter(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"train/loss_{k}", v, prog_bar=True, sync_dist=True)
 
-        loss = torch.stack(list(losses.values())).mean()
+        # loss = torch.stack(list(losses.values())).mean()
+        loss = torch.stack(list(losses.values())).sum()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
 
         return loss
@@ -177,7 +185,8 @@ class Interpreter(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v, sync_dist=True)
 
-        loss = torch.stack(list(losses.values())).mean()
+        # loss = torch.stack(list(losses.values())).mean()
+        loss = torch.stack(list(losses.values())).sum()
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
         attention_plot = plot_attention_hierarchical(
