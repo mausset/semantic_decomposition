@@ -3,8 +3,8 @@ import timm
 import torch
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder
-from models.positional_encoding import FourierScaffold
 from models.slot_attention import build_slot_attention
+from torch import nn
 from torch.optim import AdamW
 from utils.helpers import pad_batched_slots
 from utils.plot import plot_attention_hierarchical
@@ -22,7 +22,7 @@ class Interpreter(pl.LightningModule):
         resolution: tuple[int, int],
         loss_strategy: str,
         decode_strategy: str,
-        share_pos_enc=(False, True),
+        shared_weights=True,
         n_slots=[16, 8],
         detach_slots=False,
         optimizer: str = "adamw",
@@ -41,11 +41,21 @@ class Interpreter(pl.LightningModule):
             .requires_grad_(False)
         )
 
-        self.slot_attention = build_slot_attention(
-            slot_attention_arch, slot_attention_args
-        )
-
-        self.decoder = TransformerDecoder(**feature_decoder_args)
+        if shared_weights:
+            self.slot_attention = build_slot_attention(
+                slot_attention_arch, slot_attention_args
+            )
+            self.decoder = TransformerDecoder(**feature_decoder_args)
+        else:
+            self.slot_attention = nn.ModuleList(
+                [
+                    build_slot_attention(slot_attention_arch, slot_attention_args)
+                    for _ in n_slots
+                ]
+            )
+            self.decoder = nn.ModuleList(
+                [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
+            )
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
@@ -60,7 +70,7 @@ class Interpreter(pl.LightningModule):
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
-        self.share_pos_enc = share_pos_enc
+        self.shared_weights = shared_weights
         self.n_slots = n_slots
         self.detach_slots = detach_slots
         self.optimizer = optimizer
@@ -79,8 +89,13 @@ class Interpreter(pl.LightningModule):
         up = {slots.shape[1]: slots}
         attn_list = []
         slots_list = []
-        for n in self.n_slots:
-            slots, attn_map = self.slot_attention(slots, n_slots=n)
+
+        slot_attention_list = self.slot_attention
+        if self.shared_weights:
+            slot_attention_list = [self.slot_attention] * len(self.n_slots)
+
+        for n, sa in zip(self.n_slots, slot_attention_list):
+            slots, attn_map = sa(slots, n_slots=n)
             if attn_list:
                 attn_map = attn_list[-1] @ attn_map
             if self.detach_slots:
@@ -94,6 +109,10 @@ class Interpreter(pl.LightningModule):
     def decode(self, slots_list):
 
         down = {}
+
+        decoder_list = self.decoder
+        if self.shared_weights:
+            decoder_list = [self.decoder] * len(self.n_slots)
 
         if self.decode_strategy == "flat":
             slots_dict = {n: slots for n, slots in zip(self.n_slots, slots_list)}
@@ -112,7 +131,7 @@ class Interpreter(pl.LightningModule):
             for i in range(len(self.n_slots) - 1, 0, -1):
                 slots = slots_list[i]
                 res = (1, slots_list[i - 1].shape[1])
-                decoded, _ = self.decoder(
+                decoded, _ = decoder_list[i](
                     slots,
                     resolution=res,
                 )
@@ -120,7 +139,7 @@ class Interpreter(pl.LightningModule):
                 if self.loss_strategy == "anchored":
                     slots_list[i - 1] = torch.cat([slots_list[i - 1], decoded], dim=0)
 
-            decoded, _ = self.decoder(slots_list[0], self.feature_resolution)
+            decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
         return down
