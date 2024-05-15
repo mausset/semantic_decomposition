@@ -2,7 +2,7 @@ import lightning as pl
 import timm
 import torch
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder
+from models.decoder import TransformerDecoder, TransformerDecoderIterative
 from models.slot_attention import build_slot_attention
 from torch import nn
 from torch.optim import AdamW
@@ -54,8 +54,9 @@ class Interpreter(pl.LightningModule):
                 ]
             )
             self.decoder = nn.ModuleList(
-                [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
+                [TransformerDecoderIterative(**feature_decoder_args) for _ in n_slots]
             )
+            self.decoder[0] = TransformerDecoder(**feature_decoder_args)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
@@ -66,7 +67,7 @@ class Interpreter(pl.LightningModule):
             self.resolution[1] // self.patch_size,
         )
         self.loss_fn = torch.nn.MSELoss()
-        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.01)
+        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.1)
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
@@ -169,7 +170,7 @@ class Interpreter(pl.LightningModule):
                     up[v.shape[1]].detach() if self.detach_slots else up[v.shape[1]]
                 )
                 if k == self.n_slots[0]:
-                    loss = self.loss_fn(v, target)
+                    loss = self.loss_fn(v, target).mean()
                     losses[k] = loss
                     continue
                 loss = self.internal_loss_fn(v, target).mean()
