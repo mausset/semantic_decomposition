@@ -96,7 +96,7 @@ class Interpreter(pl.LightningModule):
             slot_attention_list = [self.slot_attention] * len(self.n_slots)
 
         for n, sa in zip(self.n_slots, slot_attention_list):
-            slots = slots.detach() if self.detach_slots else slots
+            # slots = slots.detach() if self.detach_slots else slots
             slots, attn_map = sa(slots, n_slots=n)
             if attn_list:
                 attn_map = attn_list[-1] @ attn_map
