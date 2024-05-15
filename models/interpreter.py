@@ -170,7 +170,7 @@ class Interpreter(pl.LightningModule):
                     up[v.shape[1]].detach() if self.detach_slots else up[v.shape[1]]
                 )
                 if k == self.n_slots[0]:
-                    loss = self.loss_fn(v, target).mean()
+                    loss = self.loss_fn(v, target)
                     losses[k] = loss
                     continue
                 loss = self.internal_loss_fn(v, target).mean()
