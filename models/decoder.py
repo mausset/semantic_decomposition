@@ -109,7 +109,7 @@ class TransformerDecoderIterative(pl.LightningModule):
 
         self.transformer = Encoder(
             dim=dim,
-            depth=4,
+            depth=1,
             cross_attend=True,
             ff_glu=True,
             ff_swish=True,
