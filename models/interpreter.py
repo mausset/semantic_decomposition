@@ -66,7 +66,7 @@ class Interpreter(pl.LightningModule):
             self.resolution[1] // self.patch_size,
         )
         self.loss_fn = torch.nn.MSELoss()
-        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.1)
+        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.01)
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
