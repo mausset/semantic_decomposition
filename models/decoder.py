@@ -54,12 +54,11 @@ class TransformerDecoder(pl.LightningModule):
 
 class TransformerDecoderIterative(pl.LightningModule):
 
-    def __init__(self, dim, depth, n_iters=5) -> None:
+    def __init__(self, dim, depth) -> None:
         super().__init__()
 
         self.dim = dim
         self.depth = depth
-        self.n_iters = n_iters
 
         self.prior = GaussianPrior(dim)
 

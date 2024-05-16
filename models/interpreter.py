@@ -24,7 +24,6 @@ class Interpreter(pl.LightningModule):
         decode_strategy: str,
         shared_weights=True,
         blur: float = 0.1,
-        n_iters=5,
         n_slots=[16, 8],
         detach_slots=False,
         optimizer: str = "adamw",
@@ -56,10 +55,7 @@ class Interpreter(pl.LightningModule):
                 ]
             )
             self.decoder = nn.ModuleList(
-                [
-                    TransformerDecoderIterative(**feature_decoder_args, n_iters=n_iters)
-                    for _ in n_slots
-                ]
+                [TransformerDecoderIterative(**feature_decoder_args) for _ in n_slots]
             )
             self.decoder[0] = TransformerDecoder(**feature_decoder_args)
 
