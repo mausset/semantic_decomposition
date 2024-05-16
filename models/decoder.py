@@ -83,17 +83,6 @@ class TransformerDecoderIterative(pl.LightningModule):
         sample = self.prior(x, resolution[0] * resolution[1])
         target = sample
 
-        for _ in range(self.n_iters):
-            result, hiddens = self.transformer(
-                target,
-                mask=mask,
-                context=x,
-                context_mask=context_mask,
-                return_hiddens=True,
-            )
-            target = result
-
-        target = target.detach() - sample.detach() + sample
         result, hiddens = self.transformer(
             target,
             mask=mask,
