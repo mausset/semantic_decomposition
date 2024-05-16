@@ -7,51 +7,6 @@ from x_transformers import Encoder
 from models.components import GaussianPrior
 
 
-class MLPDecoder(pl.LightningModule):
-
-    def __init__(self, dim, depth, resolution, expansion_factor=2) -> None:
-        super().__init__()
-
-        self.dim = dim
-        self.depth = depth
-        self.resolution = resolution
-
-        self.pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
-
-        mlp = []
-        for i in range(depth - 1):
-            mlp.append(
-                nn.Linear(dim * (expansion_factor if i else 1), dim * expansion_factor)
-            )
-            mlp.append(nn.ReLU())
-        mlp.append(nn.Linear(dim * expansion_factor, dim))
-        self.mlp = nn.Sequential(*mlp)
-
-        self.alpha_projection = nn.Linear(dim, 1)
-
-    def forward(self, x):
-        """
-        args:
-            x: (B, N, D), extracted object representations
-        returns:
-            (B, H, W), predicted masks
-        """
-
-        grid = self.pos_enc(self.resolution, device=x.device)
-        grid = repeat(grid, "b h w d -> (b r) n h w d", r=x.shape[0], n=x.shape[1])
-
-        scaffold = self.pos_enc(grid)
-        x = repeat(x, "b n d -> b n h w d", h=self.resolution[0], w=self.resolution[1])
-        x = x + scaffold
-
-        result = self.mlp(x)
-        alpha = self.alpha_projection(result)
-        alpha = F.softmax(alpha, dim=1)
-        result = (result * alpha).sum(dim=1)
-
-        return result, alpha
-
-
 class TransformerDecoder(pl.LightningModule):
 
     def __init__(self, dim, depth, pos_enc=None) -> None:
@@ -99,11 +54,12 @@ class TransformerDecoder(pl.LightningModule):
 
 class TransformerDecoderIterative(pl.LightningModule):
 
-    def __init__(self, dim, depth) -> None:
+    def __init__(self, dim, depth, n_iters=5) -> None:
         super().__init__()
 
         self.dim = dim
         self.depth = depth
+        self.n_iters = n_iters
 
         self.prior = GaussianPrior(dim)
 
@@ -127,7 +83,7 @@ class TransformerDecoderIterative(pl.LightningModule):
         sample = self.prior(x, resolution[0] * resolution[1])
         target = sample
 
-        for _ in range(self.depth):
+        for _ in range(self.n_iters):
             result, hiddens = self.transformer(
                 target,
                 mask=mask,

@@ -23,6 +23,8 @@ class Interpreter(pl.LightningModule):
         loss_strategy: str,
         decode_strategy: str,
         shared_weights=True,
+        blur: float = 0.1,
+        n_iters=5,
         n_slots=[16, 8],
         detach_slots=False,
         optimizer: str = "adamw",
@@ -54,7 +56,10 @@ class Interpreter(pl.LightningModule):
                 ]
             )
             self.decoder = nn.ModuleList(
-                [TransformerDecoderIterative(**feature_decoder_args) for _ in n_slots]
+                [
+                    TransformerDecoderIterative(**feature_decoder_args, n_iters=n_iters)
+                    for _ in n_slots
+                ]
             )
             self.decoder[0] = TransformerDecoder(**feature_decoder_args)
 
@@ -67,7 +72,7 @@ class Interpreter(pl.LightningModule):
             self.resolution[1] // self.patch_size,
         )
         self.loss_fn = torch.nn.MSELoss()
-        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.1)
+        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=blur)
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
