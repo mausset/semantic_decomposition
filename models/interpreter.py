@@ -46,7 +46,7 @@ class Interpreter(pl.LightningModule):
             self.slot_attention = build_slot_attention(
                 slot_attention_arch, slot_attention_args
             )
-            self.decoder = TransformerDecoder(**feature_decoder_args)
+            self.decoder = TransformerDecoderIterative(**feature_decoder_args)
         else:
             self.slot_attention = nn.ModuleList(
                 [
@@ -171,7 +171,7 @@ class Interpreter(pl.LightningModule):
                     up[v.shape[1]].detach() if self.detach_slots else up[v.shape[1]]
                 )
                 if k == self.n_slots[0]:
-                    loss = self.loss_fn(v, target)
+                    loss = self.internal_loss_fn(v, target).mean()
                     losses[k] = loss
                     continue
                 loss = self.internal_loss_fn(v, target).mean()
