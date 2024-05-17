@@ -143,6 +143,9 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
+        if self.decode_strategy == "wonky":
+            pass
+
         return down
 
     def calculate_loss(self, up, down):
@@ -175,6 +178,14 @@ class Interpreter(pl.LightningModule):
                     losses[k] = loss
                     continue
                 loss = self.internal_loss_fn(v, target).mean()
+                losses[k] = loss
+
+        if self.loss_strategy == "flat":
+            feature_key = max(up)
+            for k, v in up.items():
+                if k == feature_key:
+                    continue
+                loss = self.internal_loss_fn(v, up[feature_key]).mean()
                 losses[k] = loss
 
         return losses
