@@ -23,9 +23,7 @@ class Interpreter(pl.LightningModule):
         loss_strategy: str,
         decode_strategy: str,
         shared_weights=True,
-        blur: float = 0.1,
         n_slots=[16, 8],
-        detach_slots=False,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -68,13 +66,11 @@ class Interpreter(pl.LightningModule):
             self.resolution[1] // self.patch_size,
         )
         self.loss_fn = torch.nn.MSELoss()
-        self.internal_loss_fn = SamplesLoss("sinkhorn", p=2, blur=blur)
         self.loss_strategy = loss_strategy
         self.decode_strategy = decode_strategy
 
         self.shared_weights = shared_weights
         self.n_slots = n_slots
-        self.detach_slots = detach_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
 
@@ -97,7 +93,6 @@ class Interpreter(pl.LightningModule):
             slot_attention_list = [self.slot_attention] * len(self.n_slots)
 
         for n, sa in zip(self.n_slots, slot_attention_list):
-            slots = slots.detach() if self.detach_slots else slots
             slots, attn_map = sa(slots, n_slots=n)
             if attn_list:
                 attn_map = attn_list[-1] @ attn_map
@@ -143,8 +138,9 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
-        if self.decode_strategy == "wonky":
-            pass
+        if self.decode_strategy == "last":
+            decoded, _ = decoder_list[-1](slots_list[-1], self.feature_resolution)
+            down[self.n_slots[-1]] = decoded
 
         return down
 
@@ -168,25 +164,11 @@ class Interpreter(pl.LightningModule):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
 
-        if self.loss_strategy == "local":
-            for k, v in down.items():
-                target = (
-                    up[v.shape[1]].detach() if self.detach_slots else up[v.shape[1]]
-                )
-                if k == self.n_slots[0]:
-                    loss = self.internal_loss_fn(v, target).mean()
-                    losses[k] = loss
-                    continue
-                loss = self.internal_loss_fn(v, target).mean()
-                losses[k] = loss
-
-        if self.loss_strategy == "flat":
-            feature_key = max(up)
-            for k, v in up.items():
-                if k == feature_key:
-                    continue
-                loss = self.internal_loss_fn(v, up[feature_key]).mean()
-                losses[k] = loss
+        if self.loss_strategy == "last":
+            decoded_features = down[self.n_slots[-1]]
+            features = up[decoded_features.shape[1]]
+            loss = self.loss_fn(decoded_features, features)
+            losses[self.n_slots[-1]] = loss
 
         return losses
 
