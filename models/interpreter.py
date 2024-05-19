@@ -138,9 +138,13 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
-        if self.decode_strategy == "last":
+        if "last" in self.decode_strategy:
             decoded, _ = decoder_list[-1](slots_list[-1], self.feature_resolution)
             down[self.n_slots[-1]] = decoded
+
+        if "first" in self.decode_strategy:
+            decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
+            down[self.n_slots[0]] = decoded
 
         return down
 
@@ -164,11 +168,17 @@ class Interpreter(pl.LightningModule):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
 
-        if self.loss_strategy == "last":
+        if "last" in self.loss_strategy:
             decoded_features = down[self.n_slots[-1]]
             features = up[decoded_features.shape[1]]
             loss = self.loss_fn(decoded_features, features)
             losses[self.n_slots[-1]] = loss
+
+        if "first" in self.loss_strategy:
+            decoded_features = down[self.n_slots[0]]
+            features = up[decoded_features.shape[1]]
+            loss = self.loss_fn(decoded_features, features)
+            losses[self.n_slots[0]] = loss
 
         return losses
 
