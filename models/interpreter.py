@@ -136,6 +136,14 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
+        if "last" in self.decode_strategy:
+            slots = slots_list[-1]
+            decoded, _ = decoder_list[-1](
+                slots,
+                resolution=self.feature_resolution,
+            )
+            down[self.n_slots[-1]] = decoded
+
         return down
 
     def calculate_loss(self, up, down):
@@ -157,6 +165,12 @@ class Interpreter(pl.LightningModule):
             for n, chunk in zip(self.n_slots, decoded_chunked):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
+
+        if "last" in self.loss_strategy:
+            decoded_features = down[self.n_slots[-1]]
+            features = up[decoded_features.shape[1]]
+            loss = self.loss_fn(decoded_features, features)
+            losses[self.n_slots[-1]] = loss
 
         return losses
 
