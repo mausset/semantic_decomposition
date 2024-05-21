@@ -21,7 +21,7 @@ class Interpreter(pl.LightningModule):
         resolution: tuple[int, int],
         loss_strategy: str,
         decode_strategy: str,
-        shared_weights=True,
+        shared_weights: tuple[bool, bool] = [True, True],
         n_slots=[16, 8],
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -39,11 +39,10 @@ class Interpreter(pl.LightningModule):
             .requires_grad_(False)
         )
 
-        if shared_weights:
+        if shared_weights[0]:
             self.slot_attention = build_slot_attention(
                 slot_attention_arch, slot_attention_args
             )
-            self.decoder = TransformerDecoder(**feature_decoder_args)
         else:
             self.slot_attention = nn.ModuleList(
                 [
@@ -51,6 +50,10 @@ class Interpreter(pl.LightningModule):
                     for _ in n_slots
                 ]
             )
+
+        if shared_weights[1]:
+            self.decoder = TransformerDecoder(**feature_decoder_args)
+        else:
             self.decoder = nn.ModuleList(
                 [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
             )
