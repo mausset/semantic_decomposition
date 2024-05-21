@@ -136,13 +136,15 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
-        if "last" in self.decode_strategy:
-            slots = slots_list[-1]
-            decoded, _ = decoder_list[-1](
+        if self.decode_strategy == "concat":
+            slots = torch.cat(slots_list, dim=1)
+
+            decoded, _ = self.decoder(
                 slots,
                 resolution=self.feature_resolution,
             )
-            down[self.n_slots[-1]] = decoded
+
+            down[self.n_slots[0]] = decoded
 
         return down
 
@@ -166,11 +168,11 @@ class Interpreter(pl.LightningModule):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
 
-        if "last" in self.loss_strategy:
-            decoded_features = down[self.n_slots[-1]]
+        if self.loss_strategy == "concat":
+            decoded_features = down[self.n_slots[0]]
             features = up[decoded_features.shape[1]]
             loss = self.loss_fn(decoded_features, features)
-            losses[self.n_slots[-1]] = loss
+            losses["concat"] = loss
 
         return losses
 
