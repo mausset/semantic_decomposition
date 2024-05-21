@@ -159,7 +159,7 @@ class Interpreter(pl.LightningModule):
         """
 
         losses = {}
-        if self.loss_strategy == "anchored":
+        if self.loss_strategy == "flat":
             decoded_features = down[self.n_slots[0]]
             features = up[decoded_features.shape[1]]
             decoded_chunked = torch.chunk(decoded_features, len(self.n_slots), dim=0)
