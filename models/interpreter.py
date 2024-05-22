@@ -90,7 +90,7 @@ class Interpreter(pl.LightningModule):
         slots_list = []
 
         slot_attention_list = self.slot_attention
-        if self.shared_weights:
+        if self.shared_weights[0]:
             slot_attention_list = [self.slot_attention] * len(self.n_slots)
 
         for n, sa in zip(self.n_slots, slot_attention_list):
@@ -108,7 +108,7 @@ class Interpreter(pl.LightningModule):
         down = {}
 
         decoder_list = self.decoder
-        if self.shared_weights:
+        if self.shared_weights[1]:
             decoder_list = [self.decoder] * len(self.n_slots)
 
         if self.decode_strategy == "flat":
