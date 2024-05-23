@@ -167,7 +167,7 @@ class ARIMetric(torchmetrics.Metric):
         self.ignore_overlaps = ignore_overlaps
         self.add_state(
             "values",
-            default=torch.tensor(0.0, dtype=torch.float64),
+            default=torch.tensor(0.0, dtype=torch.float32),
             dist_reduce_fx="sum",
         )
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -330,7 +330,7 @@ class UnsupervisedMaskIoUMetric(torchmetrics.Metric):
 
         self.add_state(
             "values",
-            default=torch.tensor(0.0, dtype=torch.float64),
+            default=torch.tensor(0.0, dtype=torch.float32),
             dist_reduce_fx="sum",
         )
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -472,8 +472,8 @@ def unsupervised_mask_iou(
     pred_mask = pred_mask.unsqueeze(1).to(torch.bool)
     true_mask = true_mask.unsqueeze(0).to(torch.bool)
 
-    intersection = torch.sum(pred_mask & true_mask, dim=-1).to(torch.float64)
-    union = torch.sum(pred_mask | true_mask, dim=-1).to(torch.float64)
+    intersection = torch.sum(pred_mask & true_mask, dim=-1).to(torch.float32)
+    union = torch.sum(pred_mask | true_mask, dim=-1).to(torch.float32)
     pairwise_iou = intersection / union
 
     # Remove NaN from divide-by-zero: class does not occur, and class was not predicted.
@@ -499,7 +499,7 @@ def unsupervised_mask_iou(
         raise ValueError(f"Unknown matching {matching}")
 
     matched_iou = pairwise_iou[pred_idxs, true_idxs]
-    iou = torch.zeros(n_gt_classes, dtype=torch.float64, device=pairwise_iou.device)
+    iou = torch.zeros(n_gt_classes, dtype=torch.float32, device=pairwise_iou.device)
     iou[true_idxs] = matched_iou
 
     if reduction == "mean":
@@ -542,12 +542,12 @@ def adjusted_rand_index(
     n_pred_clusters = pred_mask.shape[-1]
     pred_cluster_ids = torch.argmax(pred_mask, axis=-1)
 
-    # Convert true and predicted clusters to one-hot ('oh') representations. We use float64 here on
+    # Convert true and predicted clusters to one-hot ('oh') representations. We use float32 here on
     # purpose, otherwise mixed precision training automatically casts to FP16 in some of the
     # operations below, which can create overflows.
-    true_mask_oh = true_mask.to(torch.float64)  # already one-hot
+    true_mask_oh = true_mask.to(torch.float32)  # already one-hot
     pred_mask_oh = torch.nn.functional.one_hot(pred_cluster_ids, n_pred_clusters).to(
-        torch.float64
+        torch.float32
     )
 
     n_ij = torch.einsum("bnc,bnk->bck", true_mask_oh, pred_mask_oh)
