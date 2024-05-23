@@ -1,11 +1,14 @@
 import lightning as pl
 import timm
 import torch
+from einops import rearrange
 from models.decoder import TransformerDecoder
 from models.slot_attention import build_slot_attention
 from torch import nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from utils.helpers import pad_batched_slots
+from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
 from utils.plot import plot_attention_hierarchical
 
 
@@ -74,6 +77,21 @@ class Interpreter(pl.LightningModule):
         self.n_slots = n_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
+
+        self.mbo_i_metric = UnsupervisedMaskIoUMetric(
+            matching="best_overlap", ignore_background=True, ignore_overlaps=True
+        ).to(self.device)
+        self.mbo_c_metric = UnsupervisedMaskIoUMetric(
+            matching="best_overlap", ignore_background=True, ignore_overlaps=True
+        ).to(self.device)
+
+        self.miou_metric = UnsupervisedMaskIoUMetric(
+            matching="hungarian", ignore_background=True, ignore_overlaps=True
+        ).to(self.device)
+
+        self.ari_metric = ARIMetric(foreground=True, ignore_overlaps=True).to(
+            self.device
+        )
 
     # Shorthand
     def forward_features(self, x):
@@ -202,7 +220,43 @@ class Interpreter(pl.LightningModule):
 
         return loss
 
+    def calc_metrics(self, masks, attn_list):
+
+        i_mask, c_mask, ignore_mask = masks
+
+        attn_list = [
+            rearrange(a, "b (h w) n -> b n h w", h=self.feature_resolution[0])
+            for a in attn_list
+        ]
+
+        attn_list = [
+            F.interpolate(a, size=self.resolution, mode="bilinear").unsqueeze(2)
+            for a in attn_list
+        ]
+
+        pred_mask = [a.argmax(1).squeeze(1) for a in attn_list]
+
+        true_mask_i = F.one_hot(i_mask).to(torch.float32).permute(0, 3, 1, 2)
+        true_mask_c = F.one_hot(c_mask).to(torch.float32).permute(0, 3, 1, 2)
+        pred_mask = [
+            F.one_hot(m).to(torch.float32).permute(0, 3, 1, 2) for m in pred_mask
+        ]
+
+        self.mbo_i_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
+        self.mbo_c_metric.update(pred_mask[-1], true_mask_c, ignore_mask)
+        self.miou_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
+        self.ari_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
+
+        mbo_i = self.mbo_i_metric.compute()
+        mbo_c = self.mbo_c_metric.compute()
+        miou = self.miou_metric.compute()
+        ari = self.ari_metric.compute()
+
+        return mbo_i, mbo_c, miou, ari
+
     def validation_step(self, x):
+        x, *masks = x
+
         losses, attn_list = self.common_step(x)
 
         for k, v in losses.items():
@@ -224,6 +278,13 @@ class Interpreter(pl.LightningModule):
                 key="attention",
                 images=[attention_plot],
             )
+
+        mbo_i, mbo_c, miou, ari = self.calc_metrics(masks, attn_list)
+
+        self.log("val/mbo_i", mbo_i, sync_dist=True, prog_bar=True)
+        self.log("val/mbo_c", mbo_c, sync_dist=True, prog_bar=True)
+        self.log("val/miou", miou, sync_dist=True, prog_bar=True)
+        self.log("val/ari", ari, sync_dist=True, prog_bar=True)
 
         return loss
 
