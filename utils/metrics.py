@@ -240,7 +240,12 @@ class ARIMetric(torchmetrics.Metric):
         self.total += len(ari)
 
     def compute(self) -> torch.Tensor:
-        return self.values / self.total
+        if self.total == 0:
+            return torch.zeros_like(self.values)
+
+        mean_ari = self.values / self.total
+
+        return mean_ari
 
 
 class PatchARIMetric(ARIMetric):
@@ -420,8 +425,10 @@ class UnsupervisedMaskIoUMetric(torchmetrics.Metric):
     def compute(self) -> torch.Tensor:
         if self.total == 0:
             return torch.zeros_like(self.values)
-        else:
-            return self.values / self.total
+
+        mean_iou = self.values / self.total
+
+        return mean_iou
 
 
 class MaskCorLocMetric(UnsupervisedMaskIoUMetric):

@@ -288,6 +288,12 @@ class Interpreter(pl.LightningModule):
 
         return loss
 
+    def on_validation_end(self):
+        self.mbo_i_metric.reset()
+        self.mbo_c_metric.reset()
+        self.miou_metric.reset()
+        self.ari_metric.reset()
+
     def configure_optimizers(self):
         if self.optimizer == "adamw":
             return AdamW(self.parameters(), **self.optimizer_args)
