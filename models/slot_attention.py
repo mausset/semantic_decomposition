@@ -93,7 +93,7 @@ class SA(pl.LightningModule):
 
         # NOTE: GRUCell does not support bf16
         if k.device.type == "cuda":
-            with torch.autocast(device_type=k.device, dtype=torch.float32):
+            with torch.autocast(device_type=k.device.type, dtype=torch.float32):
                 slots = self.gru(updates, slots)
         else:  # MPS / CPU
             slots = self.gru(updates, slots)
