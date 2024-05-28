@@ -90,7 +90,14 @@ class SA(pl.LightningModule):
 
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
-        slots = self.gru(updates, slots)
+
+        # NOTE: GRUCell does not support bf16
+        if k.device == "cuda":
+            with torch.autocast(device_type=k.device, dtype=torch.float32):
+                slots = self.gru(updates, slots)
+        else:  # MPS / CPU
+            slots = self.gru(updates, slots)
+
         slots = rearrange(slots, "(b n) d -> b n d", n=n)
 
         slots = slots + self.mlp(self.norm_pre_ff(slots))
