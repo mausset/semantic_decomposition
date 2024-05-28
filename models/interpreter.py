@@ -51,8 +51,10 @@ class Interpreter(pl.LightningModule):
         else:
             self.slot_attention = nn.ModuleList(
                 [
-                    build_slot_attention(slot_attention_arch, slot_attention_args)
-                    for _ in n_slots
+                    build_slot_attention(
+                        slot_attention_arch, slot_attention_args, n_slots=n
+                    )
+                    for n in n_slots
                 ]
             )
 

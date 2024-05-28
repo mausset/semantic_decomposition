@@ -7,13 +7,13 @@ from x_transformers import Encoder
 from models.components import SwiGLUFFN, GaussianPrior
 
 
-def build_slot_attention(arch: str, args):
+def build_slot_attention(arch: str, args, **kwargs):
 
     match arch:
         case "sa":
-            return SA(**args)
+            return SA(**args, **kwargs)
         case "sat":
-            return SAT(**args)
+            return SAT(**args, **kwargs)
         case _:
             raise ValueError(f"Unknown slot attention architecture: {arch}")
 
@@ -25,6 +25,7 @@ class SA(pl.LightningModule):
         input_dim,
         slot_dim,
         n_iters=3,
+        n_slots=8,
         implicit=False,
         ff_swiglu=False,
         sampler="gaussian",
@@ -41,8 +42,8 @@ class SA(pl.LightningModule):
 
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
-        else:
-            self.sampler = sampler
+        elif sampler == "learnable_embedding":
+            self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -76,6 +77,8 @@ class SA(pl.LightningModule):
         return updates, attn
 
     def sample(self, x, n_slots):
+        if isinstance(self.sampler, nn.Parameter):
+            return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
         return self.sampler(x, n_slots)
 
     def step(self, slots, k, v, return_attn=False):
@@ -127,6 +130,7 @@ class SAT(nn.Module):
         input_dim,
         slot_dim,
         n_iters=3,
+        n_slots=8,
         implicit=False,
         depth=1,
         sampler="gaussian",
@@ -144,8 +148,8 @@ class SAT(nn.Module):
 
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
-        else:
-            self.sampler = sampler
+        elif sampler == "learnable_embedding":
+            self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=ica_bias)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=ica_bias)
@@ -163,7 +167,8 @@ class SAT(nn.Module):
         self.norm_ica = nn.LayerNorm(slot_dim)
 
     def sample(self, x, n_slots, sample=None):
-
+        if isinstance(self.sampler, nn.Parameter):
+            return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
         return self.sampler(x, n_slots, sample=sample)
 
     def inv_cross_attn(self, q, k, v, mask=None):
