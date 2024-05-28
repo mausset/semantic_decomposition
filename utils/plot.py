@@ -34,18 +34,19 @@ def plot_attention(
     colors = repeat(colors, "n c -> n c 1 1")
 
     cat_imgs = [img]
-    attn_map = rearrange(attn_map, "(h w) n -> h w n", h=res // patch_size)
-    max_idx = attn_map.argmax(dim=-1, keepdim=True)
-
-    attn_mask = (
-        F.one_hot(max_idx.squeeze(-1), num_classes=n)
-        .float()
+    attn_map = (
+        rearrange(attn_map, "(h w) n -> h w n", h=res // patch_size)
         .permute(2, 0, 1)
         .unsqueeze(0)
     )
-    attn_mask = F.interpolate(
-        attn_mask, scale_factor=patch_size, mode="nearest"
+
+    attn_map = F.interpolate(
+        attn_map, scale_factor=patch_size, mode="bilinear"
     ).squeeze(0)
+
+    max_idx = attn_map.argmax(dim=0)
+
+    attn_mask = F.one_hot(max_idx, num_classes=n).float().permute(2, 0, 1)
 
     attn_mask = repeat(attn_mask, "n h w -> n 1 h w")
     segment = (colors * attn_mask).sum(dim=0)

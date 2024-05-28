@@ -27,6 +27,7 @@ class SA(pl.LightningModule):
         n_iters=3,
         implicit=False,
         ff_swiglu=False,
+        sampler="gaussian",
         eps=1e-8,
     ):
         super().__init__()
@@ -38,10 +39,10 @@ class SA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.init_mu = nn.Parameter(torch.randn(slot_dim))
-        init_log_sigma = torch.empty((1, 1, slot_dim))
-        nn.init.xavier_uniform_(init_log_sigma)
-        self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
+        if sampler == "gaussian":
+            self.sampler = GaussianPrior(slot_dim)
+        else:
+            self.sampler = sampler
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -62,27 +63,28 @@ class SA(pl.LightningModule):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
+    def inv_cross_attn(self, q, k, v, mask=None):
+
+        dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+        if mask is not None:
+            # NOTE: Masking attention is sensitive to the chosen value
+            dots.masked_fill_(~mask[:, None, :], -torch.finfo(k.dtype).max)
+        attn = dots.softmax(dim=1) + self.eps
+        attn = attn / attn.sum(dim=-1, keepdim=True)
+        updates = torch.einsum("bjd,bij->bid", v, attn)
+
+        return updates, attn
+
     def sample(self, x, n_slots):
-        b, _, _ = x.shape
-
-        mu = repeat(self.init_mu, "d -> b n d", b=b, n=n_slots)
-        log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n_slots)
-
-        sample = mu + log_sigma.exp() * torch.randn_like(mu)
-
-        return sample
+        return self.sampler(x, n_slots)
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
-        dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
-        attn = dots.softmax(dim=1) + self.eps
+        updates, attn = self.inv_cross_attn(q, k, v)
 
-        attn = attn / attn.sum(dim=-1, keepdim=True)
-
-        updates = torch.einsum("bjd,bij->bid", v, attn)
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
         slots = self.gru(updates, slots)

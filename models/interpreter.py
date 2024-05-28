@@ -11,6 +11,8 @@ from utils.helpers import pad_batched_slots
 from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
 from utils.plot import plot_attention_hierarchical
 
+from matplotlib import pyplot as plt
+
 
 class Interpreter(pl.LightningModule):
 
