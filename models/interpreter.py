@@ -97,6 +97,8 @@ class Interpreter(pl.LightningModule):
             self.device
         )
 
+        self.log_img = True
+
     # Shorthand
     def forward_features(self, x):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
@@ -277,11 +279,16 @@ class Interpreter(pl.LightningModule):
             patch_size=self.patch_size,
         )
 
-        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger):
+        if (
+            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)
+            and self.trainer.global_rank == 0
+            and self.log_img
+        ):
             self.logger.log_image(
                 key="attention",
                 images=[attention_plot],
             )
+            self.log_img = False
 
         mbo_i, mbo_c, miou, ari = self.calc_metrics(masks, attn_list)
 
@@ -297,6 +304,8 @@ class Interpreter(pl.LightningModule):
         self.mbo_c_metric.reset()
         self.miou_metric.reset()
         self.ari_metric.reset()
+
+        self.log_img = True
 
     def configure_optimizers(self):
         if self.optimizer == "adamw":
