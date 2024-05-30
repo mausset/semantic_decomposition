@@ -12,6 +12,7 @@ from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
 from utils.plot import plot_attention_hierarchical
 
 from matplotlib import pyplot as plt
+from x_transformers import Encoder
 
 
 class Interpreter(pl.LightningModule):
@@ -27,6 +28,7 @@ class Interpreter(pl.LightningModule):
         loss_strategy: str,
         decode_strategy: str,
         shared_weights: tuple[bool, bool] = [True, True],
+        slot_encoder: bool = False,
         n_slots=[16, 8],
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -64,6 +66,16 @@ class Interpreter(pl.LightningModule):
             self.decoder = nn.ModuleList(
                 [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
             )
+
+        if slot_encoder:
+            self.slot_encoder = Encoder(
+                dim=dim,
+                depth=4,
+                ff_glu=True,
+                ff_swish=True,
+            )
+        else:
+            self.slot_encoder = None
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
@@ -118,6 +130,10 @@ class Interpreter(pl.LightningModule):
             slot_attention_list = [self.slot_attention] * len(self.n_slots)
 
         for n, sa in zip(self.n_slots, slot_attention_list):
+
+            if self.slot_encoder is not None and n != self.n_slots[0]:
+                slots = self.slot_encoder(slots)
+
             slots, attn_map = sa(slots, n_slots=n)
             if attn_list:
                 attn_map = attn_list[-1] @ attn_map
