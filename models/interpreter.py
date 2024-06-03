@@ -1,18 +1,15 @@
 import lightning as pl
 import timm
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from models.decoder import TransformerDecoder
-from models.slot_attention import build_slot_attention
+from models.slot_attention import SA
 from torch import nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from utils.helpers import pad_batched_slots
 from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
 from utils.plot import plot_attention_hierarchical
-
-from matplotlib import pyplot as plt
-from x_transformers import Encoder
 
 
 class Interpreter(pl.LightningModule):
@@ -20,7 +17,6 @@ class Interpreter(pl.LightningModule):
     def __init__(
         self,
         image_encoder_name,
-        slot_attention_arch: str,
         slot_attention_args: dict,
         feature_decoder_args: dict,
         dim: int,
@@ -28,7 +24,6 @@ class Interpreter(pl.LightningModule):
         loss_strategy: str,
         decode_strategy: str,
         shared_weights: tuple[bool, bool] = [True, True],
-        slot_encoder: bool = False,
         n_slots=[16, 8],
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -47,17 +42,10 @@ class Interpreter(pl.LightningModule):
         )
 
         if shared_weights[0]:
-            self.slot_attention = build_slot_attention(
-                slot_attention_arch, slot_attention_args
-            )
+            self.slot_attention = SA(**slot_attention_args)
         else:
             self.slot_attention = nn.ModuleList(
-                [
-                    build_slot_attention(
-                        slot_attention_arch, slot_attention_args, n_slots=n
-                    )
-                    for n in n_slots
-                ]
+                [SA(**slot_attention_args, n_slots=n) for n in n_slots]
             )
 
         if shared_weights[1]:
@@ -66,16 +54,6 @@ class Interpreter(pl.LightningModule):
             self.decoder = nn.ModuleList(
                 [TransformerDecoder(**feature_decoder_args) for _ in n_slots]
             )
-
-        if slot_encoder:
-            self.slot_encoder = Encoder(
-                dim=dim,
-                depth=4,
-                ff_glu=True,
-                ff_swish=True,
-            )
-        else:
-            self.slot_encoder = None
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
@@ -93,30 +71,38 @@ class Interpreter(pl.LightningModule):
         self.n_slots = n_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
-
-        self.mbo_i_metric = UnsupervisedMaskIoUMetric(
-            matching="best_overlap", ignore_background=True, ignore_overlaps=True
-        ).to(self.device)
-        self.mbo_c_metric = UnsupervisedMaskIoUMetric(
-            matching="best_overlap", ignore_background=True, ignore_overlaps=True
-        ).to(self.device)
-
-        self.miou_metric = UnsupervisedMaskIoUMetric(
-            matching="hungarian", ignore_background=True, ignore_overlaps=True
-        ).to(self.device)
-
-        self.ari_metric = ARIMetric(foreground=True, ignore_overlaps=True).to(
-            self.device
-        )
-
         self.log_img = True
+
+        print(self.device)
+        self.metrics = nn.ModuleDict(
+            {
+                str(n): nn.ModuleDict(
+                    {
+                        "mbo_i": UnsupervisedMaskIoUMetric(
+                            matching="best_overlap",
+                            ignore_background=True,
+                            ignore_overlaps=True,
+                        ).to(self.device),
+                        "mbo_c": UnsupervisedMaskIoUMetric(
+                            matching="best_overlap",
+                            ignore_background=True,
+                            ignore_overlaps=True,
+                        ).to(self.device),
+                        "miou": UnsupervisedMaskIoUMetric(
+                            matching="hungarian",
+                            ignore_background=True,
+                            ignore_overlaps=True,
+                        ).to(self.device),
+                        # "ari": ARIMetric(foreground=True, ignore_overlaps=True).to(self.device),
+                    }
+                )
+                for n in n_slots
+            }
+        )
 
     # Shorthand
     def forward_features(self, x):
         return self.image_encoder.forward_features(x)[:, self.discard_tokens :]
-
-    def sample_coordinates(self, x, n_slots):
-        return torch.rand(x.shape[0], n_slots, 2, device=x.device)
 
     def encode(self, x):
         slots = x
@@ -130,9 +116,6 @@ class Interpreter(pl.LightningModule):
             slot_attention_list = [self.slot_attention] * len(self.n_slots)
 
         for n, sa in zip(self.n_slots, slot_attention_list):
-
-            if self.slot_encoder is not None and n != self.n_slots[0]:
-                slots = self.slot_encoder(slots)
 
             slots, attn_map = sa(slots, n_slots=n)
             if attn_list:
@@ -179,16 +162,6 @@ class Interpreter(pl.LightningModule):
             decoded, _ = decoder_list[0](slots_list[0], self.feature_resolution)
             down[self.n_slots[0]] = decoded
 
-        if self.decode_strategy == "concat":
-            slots = torch.cat(slots_list, dim=1)
-
-            decoded, _ = self.decoder(
-                slots,
-                resolution=self.feature_resolution,
-            )
-
-            down[self.n_slots[0]] = decoded
-
         return down
 
     def calculate_loss(self, up, down):
@@ -211,12 +184,6 @@ class Interpreter(pl.LightningModule):
                 loss = self.loss_fn(chunk, features)
                 losses[n] = loss
 
-        if self.loss_strategy == "concat":
-            decoded_features = down[self.n_slots[0]]
-            features = up[decoded_features.shape[1]]
-            loss = self.loss_fn(decoded_features, features)
-            losses["concat"] = loss
-
         return losses
 
     def common_step(self, x):
@@ -231,18 +198,67 @@ class Interpreter(pl.LightningModule):
         return losses, attn_list
 
     def training_step(self, x):
+        self.log_img = True
+
         losses, _ = self.common_step(x)
 
         for k, v in losses.items():
             self.log(f"train/loss_{k}", v, prog_bar=True, sync_dist=True)
 
         loss = torch.stack(list(losses.values())).mean()
-        # loss = torch.stack(list(losses.values())).sum()
         self.log("train/loss", loss, prog_bar=True, sync_dist=True)
 
         return loss
 
-    def calc_metrics(self, masks, attn_list):
+    def validation_step(self, x):
+        x, *masks = x
+
+        losses, attn_list = self.common_step(x)
+
+        for k, v in losses.items():
+            self.log(f"val/loss_{k}", v, sync_dist=True)
+
+        loss = torch.stack(list(losses.values())).mean()
+        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
+
+        attention_plot = plot_attention_hierarchical(
+            x[0],
+            attn_list,
+            res=self.resolution[0],
+            patch_size=self.patch_size,
+        )
+
+        if (
+            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)
+            and self.trainer.global_rank == 0
+            and self.log_img
+        ):
+            self.logger.log_image(
+                key="attention",
+                images=[attention_plot],
+            )
+            self.log_img = False
+
+        self.update_metrics(masks, attn_list)
+
+        for n, m in self.metrics.items():
+            self.log(f"val/mbo_i_{n}", m["mbo_i"].compute(), sync_dist=True)
+            self.log(f"val/mbo_c_{n}", m["mbo_c"].compute(), sync_dist=True)
+            self.log(f"val/miou_{n}", m["miou"].compute(), sync_dist=True)
+
+        for m in self.metrics.values():
+            for metric in m.values():
+                metric.reset()
+
+        return loss
+
+    def configure_optimizers(self):
+        if self.optimizer == "adamw":
+            return AdamW(self.parameters(), **self.optimizer_args)
+        else:
+            raise NotImplementedError
+
+    def update_metrics(self, masks, attn_list):
 
         i_mask, c_mask, ignore_mask = masks
 
@@ -264,67 +280,8 @@ class Interpreter(pl.LightningModule):
             F.one_hot(m).to(torch.float32).permute(0, 3, 1, 2) for m in pred_mask
         ]
 
-        self.mbo_i_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
-        self.mbo_c_metric.update(pred_mask[-1], true_mask_c, ignore_mask)
-        self.miou_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
-        self.ari_metric.update(pred_mask[-1], true_mask_i, ignore_mask)
-
-        mbo_i = self.mbo_i_metric.compute()
-        mbo_c = self.mbo_c_metric.compute()
-        miou = self.miou_metric.compute()
-        ari = self.ari_metric.compute()
-
-        return mbo_i, mbo_c, miou, ari
-
-    def validation_step(self, x):
-        x, *masks = x
-
-        losses, attn_list = self.common_step(x)
-
-        for k, v in losses.items():
-            self.log(f"val/loss_{k}", v, sync_dist=True)
-
-        loss = torch.stack(list(losses.values())).mean()
-        # loss = torch.stack(list(losses.values())).sum()
-        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
-
-        attention_plot = plot_attention_hierarchical(
-            x[0],
-            attn_list,
-            res=self.resolution[0],
-            patch_size=self.patch_size,
-        )
-
-        if (
-            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)
-            and self.trainer.global_rank == 0
-            and self.log_img
-        ):
-            self.logger.log_image(
-                key="attention",
-                images=[attention_plot],
-            )
-            self.log_img = False
-
-        mbo_i, mbo_c, miou, ari = self.calc_metrics(masks, attn_list)
-
-        self.log("val/mbo_i", mbo_i, sync_dist=True, prog_bar=True)
-        self.log("val/mbo_c", mbo_c, sync_dist=True, prog_bar=True)
-        self.log("val/miou", miou, sync_dist=True, prog_bar=True)
-        self.log("val/ari", ari, sync_dist=True, prog_bar=True)
-
-        return loss
-
-    def on_validation_end(self):
-        self.mbo_i_metric.reset()
-        self.mbo_c_metric.reset()
-        self.miou_metric.reset()
-        self.ari_metric.reset()
-
-        self.log_img = True
-
-    def configure_optimizers(self):
-        if self.optimizer == "adamw":
-            return AdamW(self.parameters(), **self.optimizer_args)
-        else:
-            raise NotImplementedError
+        for n, m in zip(self.n_slots, pred_mask):
+            n = str(n)
+            self.metrics[n]["mbo_i"].update(m, true_mask_i, ignore_mask)
+            self.metrics[n]["mbo_c"].update(m, true_mask_c, ignore_mask)
+            self.metrics[n]["miou"].update(m, true_mask_i, ignore_mask)

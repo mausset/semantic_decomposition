@@ -8,11 +8,12 @@ https://github.com/amazon-science/object-centric-learning-framework/tree/main/oc
 """
 
 import math
+from typing import Optional, Tuple, Union
+
+import scipy.optimize
 import torch
 import torchmetrics
 from torch import nn
-import scipy.optimize
-from typing import Optional, Tuple, Union
 
 
 class Resize(nn.Module):
