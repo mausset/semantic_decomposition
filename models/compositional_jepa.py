@@ -122,7 +122,7 @@ class CompositionalJEPA(pl.LightningModule):
         mask = self.gen_mask(t - 1, self.n_slots)
 
         predictions = self.predictor(slots, attn_mask=mask)
-        predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
+        predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
         targets, _ = self.teacher(features, n_slots=self.n_slots)
         targets = rearrange(targets, "(b t) n d -> b t n d", t=t)
