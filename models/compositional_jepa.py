@@ -112,12 +112,13 @@ class CompositionalJEPA(pl.LightningModule):
         slots = slots[:, :-1]
         slots = rearrange(slots, "b t n d -> (b n) t d")
 
+        tmp = rearrange(slots, "b tn d -> (b tn) d")
+        self.log("train/mean_norm", torch.norm(tmp, dim=1).mean())
+        self.log("train/mean_var", torch.var(tmp, dim=0).mean())
+
         pe = self.positional_encoding(slots)
         slots = slots + pe
         slots = rearrange(slots, "(b n) t d -> b (t n) d", n=self.n_slots)
-
-        tmp = rearrange(slots, "b tn d -> (b tn) d")
-        self.log("train/mean_norm", torch.norm(tmp, dim=1).mean())
 
         mask = self.gen_mask(t - 1, self.n_slots)
 
@@ -128,6 +129,10 @@ class CompositionalJEPA(pl.LightningModule):
         targets = rearrange(targets, "(b t) n d -> b t n d", t=t)
         targets = targets[:, 1:]
         targets = rearrange(targets, "b t n d -> (b t) n d")
+
+        tmp = rearrange(targets, "bt n d -> (bt n) d")
+        self.log("train/mean_norm", torch.norm(tmp, dim=1).mean())
+        self.log("train/mean_var", torch.var(tmp, dim=0).mean())
 
         if self.weighted:
             weights_pred = self.weighter(predictions)
