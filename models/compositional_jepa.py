@@ -23,6 +23,7 @@ class CompositionalJEPA(pl.LightningModule):
         predictor_args: dict,
         dim: int,
         resolution: tuple[int, int],
+        weighted: bool = False,
         alpha: float = 0.996,
         n_slots=8,
         optimizer: str = "adamw",
@@ -46,6 +47,10 @@ class CompositionalJEPA(pl.LightningModule):
 
         self.predictor = Encoder(**predictor_args)
 
+        if weighted:
+            self.weighter = nn.Linear(dim, 1, bias=False)
+            self.teacher_weighter = copy.deepcopy(self.weighter).requires_grad_(False)
+
         self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -58,6 +63,7 @@ class CompositionalJEPA(pl.LightningModule):
         )
         self.loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05)
 
+        self.weighted = weighted
         self.alpha = alpha
         self.n_slots = n_slots
         self.optimizer = optimizer
@@ -71,6 +77,15 @@ class CompositionalJEPA(pl.LightningModule):
             teacher_param.data = (
                 teacher_param.data * self.alpha + student_param.data * (1 - self.alpha)
             )
+
+        if self.weighted:
+            for teacher_param, student_param in zip(
+                self.teacher_weighter.parameters(), self.weighter.parameters()
+            ):
+                teacher_param.data = (
+                    teacher_param.data * self.alpha
+                    + student_param.data * (1 - self.alpha)
+                )
 
     # Shorthand
     def forward_features(self, x):
@@ -94,7 +109,6 @@ class CompositionalJEPA(pl.LightningModule):
 
         slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
         targets, _ = self.teacher(features, n_slots=self.n_slots)
-        targets = rearrange(targets, "(b t) n d -> (b n) t d", t=t)
 
         slots = rearrange(slots, "(b t) n d -> (b n) t d", t=t)
         pe = self.positional_encoding(slots)
@@ -107,9 +121,16 @@ class CompositionalJEPA(pl.LightningModule):
         mask = self.gen_mask(t, self.n_slots)
 
         predictions = self.predictor(slots, attn_mask=mask)
-        predictions = rearrange(predictions, "b (t n) d -> (b n) t d", t=t)
+        predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
 
-        loss = self.loss_fn(predictions[:, :-1], targets[:, 1:]).mean()
+        if self.weighted:
+            weights_pred = self.weighter(predictions[:, :-1])
+            weights_target = self.teacher_weighter(targets[:, 1:])
+            loss = self.loss_fn(
+                predictions[:, :-1], targets[:, 1:], a=weights_pred, b=weights_target
+            ).mean()
+        else:
+            loss = self.loss_fn(predictions[:, :-1], targets[:, 1:]).mean()
 
         return loss, attn_map
 
