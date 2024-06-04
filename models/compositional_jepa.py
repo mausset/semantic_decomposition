@@ -108,9 +108,10 @@ class CompositionalJEPA(pl.LightningModule):
         features = self.forward_features(x)
 
         slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
-        targets, _ = self.teacher(features, n_slots=self.n_slots)
+        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
+        slots = slots[:, :-1]
+        slots = rearrange(slots, "b t n d -> (b n) t d")
 
-        slots = rearrange(slots, "(b t) n d -> (b n) t d", t=t)
         pe = self.positional_encoding(slots)
         slots = slots + pe
         slots = rearrange(slots, "(b n) t d -> b (t n) d", n=self.n_slots)
@@ -123,14 +124,19 @@ class CompositionalJEPA(pl.LightningModule):
         predictions = self.predictor(slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
 
+        targets, _ = self.teacher(features, n_slots=self.n_slots)
+        targets = rearrange(targets, "(b t) n d -> b t n d", t=t)
+        targets = targets[:, 1:]
+        targets = rearrange(targets, "b t n d -> (b t) n d")
+
         if self.weighted:
-            weights_pred = self.weighter(predictions[:, :-1])
-            weights_target = self.teacher_weighter(targets[:, 1:])
+            weights_pred = self.weighter(predictions)
+            weights_target = self.teacher_weighter(targets)
             loss = self.loss_fn(
-                predictions[:, :-1], targets[:, 1:], a=weights_pred, b=weights_target
+                predictions, targets, a=weights_pred, b=weights_target
             ).mean()
         else:
-            loss = self.loss_fn(predictions[:, :-1], targets[:, 1:]).mean()
+            loss = self.loss_fn(predictions, targets).mean()
 
         return loss, attn_map
 
