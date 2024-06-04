@@ -119,7 +119,7 @@ class CompositionalJEPA(pl.LightningModule):
         tmp = rearrange(slots, "b tn d -> (b tn) d")
         self.log("train/mean_norm", torch.norm(tmp, dim=1).mean())
 
-        mask = self.gen_mask(t, self.n_slots)
+        mask = self.gen_mask(t - 1, self.n_slots)
 
         predictions = self.predictor(slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
