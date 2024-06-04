@@ -136,9 +136,11 @@ class CompositionalJEPA(pl.LightningModule):
 
         if self.weighted:
             weights_pred = self.weighter(predictions)
+            weights_pred = F.softmax(weights_pred, dim=1)
             weights_target = self.teacher_weighter(targets)
+            weights_target = F.softmax(weights_target, dim=1)
             loss = self.loss_fn(
-                predictions, targets, a=weights_pred, b=weights_target
+                weights_pred, predictions, weights_target, targets
             ).mean()
         else:
             loss = self.loss_fn(predictions, targets).mean()
