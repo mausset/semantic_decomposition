@@ -100,7 +100,7 @@ class CompositionalJEPA(pl.LightningModule):
 
         return mask
 
-    def common_step(self, x):
+    def common_step(self, x, stage="train"):
         _, t, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
@@ -112,9 +112,10 @@ class CompositionalJEPA(pl.LightningModule):
         slots = slots[:, :-1]
         slots = rearrange(slots, "b t n d -> (b n) t d")
 
-        tmp = rearrange(slots, "b tn d -> (b tn) d")
-        self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
-        self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
+        if stage == "train":
+            tmp = rearrange(slots, "b tn d -> (b tn) d")
+            self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
+            self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
 
         pe = self.positional_encoding(slots)
         slots = slots + pe
@@ -130,9 +131,10 @@ class CompositionalJEPA(pl.LightningModule):
         targets = targets[:, 1:]
         targets = rearrange(targets, "b t n d -> (b t) n d")
 
-        tmp = rearrange(targets, "bt n d -> (bt n) d")
-        self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
-        self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
+        if stage == "train":
+            tmp = rearrange(targets, "bt n d -> (bt n) d")
+            self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
+            self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
         if self.weighted:
             weights_pred = self.weighter(predictions)
@@ -157,7 +159,7 @@ class CompositionalJEPA(pl.LightningModule):
 
     def validation_step(self, x):
 
-        loss, attn_map = self.common_step(x)
+        loss, attn_map = self.common_step(x, stage="val")
 
         self.log("val/loss", loss.item(), prog_bar=True, sync_dist=True)
 
