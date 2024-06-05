@@ -20,12 +20,11 @@ class CompositionalJEPA(pl.LightningModule):
         image_encoder_name,
         slot_attention_args: dict,
         predictor_args: dict,
+        decoder_args: dict,
         dim: int,
         resolution: tuple[int, int],
-        n_prototypes: int = 4096,
+        n_prototypes: int = 16,
         alpha: float = 0.996,
-        tau: float = 0.04,
-        gamma: float = 0.9,
         n_slots=8,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -43,45 +42,36 @@ class CompositionalJEPA(pl.LightningModule):
             .requires_grad_(False)
         )
 
+        prototypes = nn.Parameter(
+            nn.init.kaiming_normal_(torch.empty(n_prototypes, dim))
+        )
+
         self.student = nn.ModuleDict(
             {
                 "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
                 "predictor": Encoder(**predictor_args),
-                # "ffn": nn.Sequential(
-                #     nn.Linear(dim, 4 * dim),
-                #     nn.GELU(),
-                #     nn.Linear(4 * dim, 4 * dim),
-                #     nn.GELU(),
-                #     nn.Linear(4 * dim, dim),
-                # ),
-                "linear": nn.Linear(dim, n_prototypes, bias=False),
+                "prototypes": nn.ParameterList(  # SO goofy
+                    [
+                        nn.Parameter(
+                            nn.init.kaiming_normal_(torch.empty(n_prototypes, dim))
+                        )
+                    ]
+                ),
+                "decoder": Encoder(**decoder_args, cross_attend=True),
             }
         )
 
         self.teacher = copy.deepcopy(self.student).requires_grad_(False)
-
-        self.student["linear"] = nn.utils.weight_norm(self.student["linear"])
-        self.student["linear"].weight_g.data.fill_(1).requires_grad_(False)
-
-        self.teacher["linear"] = nn.utils.weight_norm(self.teacher["linear"])
-        self.teacher["linear"].weight_g.data.fill_(1).requires_grad_(False)
 
         self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
         self.resolution = resolution
-        self.loss_fn = nn.CrossEntropyLoss()
-
-        self.centering_list = []
-        self.centering = nn.Parameter(
-            torch.zeros(n_prototypes, device=self.device), requires_grad=False
-        )
+        self.loss_fn = nn.MSELoss()
 
         self.dim = dim
         self.alpha = alpha
-        self.tau = tau
-        self.gamma = gamma
         self.n_prototypes = n_prototypes
         self.n_slots = n_slots
         self.optimizer = optimizer
@@ -116,21 +106,15 @@ class CompositionalJEPA(pl.LightningModule):
         x = rearrange(x, "b t ... -> (b t) ...")
 
         features = self.forward_features(x)
-        student_features = rearrange(features, "(b t) ... -> b t ...", b=b)[:, :-1]
-        student_features = rearrange(student_features, "b t ... -> (b t) ...")
-        teacher_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
-        teacher_features = rearrange(teacher_features, "b t ... -> (b t) ...")
+        s_features = rearrange(features, "(b t) ... -> b t ...", b=b)[:, :-1]
+        s_features = rearrange(s_features, "b t ... -> (b t) ...")
+        t_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
+        t_features = rearrange(t_features, "b t ... -> (b t) ...")
 
         slots, attn_map = self.student["slot_attention"](
-            student_features, n_slots=self.n_slots
+            s_features, n_slots=self.n_slots
         )
         slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
-
-        if stage == "train":
-            tmp = rearrange(slots, "b t n d -> (b t n) d")
-            self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
-            self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
-
         slots = slots + self.get_pe(b, t - 1, self.n_slots, self.dim)
         slots = rearrange(slots, "b t n d -> b (t n) d", n=self.n_slots)
 
@@ -138,35 +122,35 @@ class CompositionalJEPA(pl.LightningModule):
         predictions = self.student["predictor"](slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
-        targets, _ = self.teacher["slot_attention"](
-            teacher_features, n_slots=self.n_slots
+        targets, _ = self.teacher["slot_attention"](t_features, n_slots=self.n_slots)
+
+        s_prototypes = repeat(
+            self.student["prototypes"][0], "n d -> b n d", b=predictions.shape[0]
         )
+        s_decode = self.student["decoder"](s_prototypes, context=predictions)
+
+        t_prototypes = repeat(
+            self.teacher["prototypes"][0], "n d -> b n d", b=targets.shape[0]
+        )
+        t_decode = self.teacher["decoder"](t_prototypes, context=targets)
 
         if stage == "train":
-            tmp = rearrange(targets, "bt n d -> (bt n) d")
+            tmp = rearrange(s_decode, "bt n d -> (bt n) d")
+            self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
+            self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
+
+            tmp = rearrange(t_decode, "bt n d -> (bt n) d")
             self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
             self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
-        predictions = F.normalize(predictions, p=2, dim=-1)
-        predictions = self.student["linear"](predictions)
-        predictions = predictions.sum(dim=1) / self.tau
-
-        targets = F.normalize(targets, p=2, dim=-1)
-        targets = self.teacher["linear"](targets)
-        targets = targets.sum(dim=1)
-        self.centering_list.append(targets.mean(dim=0))
-
-        targets = F.softmax(targets - self.centering / self.tau, dim=-1)
-
         # Expects predictions to be logits, not probabilities
-        loss = self.loss_fn(predictions, targets)
+        loss = self.loss_fn(s_decode, t_decode)
 
         return loss, attn_map
 
     def training_step(self, x):
 
         loss, _ = self.common_step(x)
-
         self.log("train/loss", loss.item(), prog_bar=True, sync_dist=True)
 
         return loss
@@ -174,7 +158,6 @@ class CompositionalJEPA(pl.LightningModule):
     def validation_step(self, x):
 
         loss, attn_map = self.common_step(x, stage="val")
-
         self.log("val/loss", loss.item(), prog_bar=True, sync_dist=True)
 
         attention_plot = plot_attention(
@@ -197,10 +180,6 @@ class CompositionalJEPA(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         self.update_teacher()
-        self.centering.data = self.centering.data * self.gamma + torch.stack(
-            self.centering_list
-        ).mean(dim=0) * (1 - self.gamma)
-        self.centering_list = []
         super().optimizer_step(*args, **kwargs)
 
     def configure_optimizers(self):
