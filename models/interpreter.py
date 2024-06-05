@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from models.decoder import TransformerDecoder
 from models.slot_attention import SA
-from torch import nn
+from torch import mean, nn
 from torch.optim import AdamW
 from utils.helpers import pad_batched_slots
 from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
@@ -245,6 +245,20 @@ class Interpreter(pl.LightningModule):
             self.log(f"val/mbo_i_{n}", m["mbo_i"].compute(), sync_dist=True)
             self.log(f"val/mbo_c_{n}", m["mbo_c"].compute(), sync_dist=True)
             self.log(f"val/miou_{n}", m["miou"].compute(), sync_dist=True)
+
+        mean_miou = torch.stack(
+            [m["miou"].compute() for m in self.metrics.values()]
+        ).mean()
+        mean_mbo_i = torch.stack(
+            [m["mbo_i"].compute() for m in self.metrics.values()]
+        ).mean()
+        mean_mbo_c = torch.stack(
+            [m["mbo_c"].compute() for m in self.metrics.values()]
+        ).mean()
+
+        self.log("val/mean_miou", mean_miou, sync_dist=True)
+        self.log("val/mean_mbo_i", mean_mbo_i, sync_dist=True)
+        self.log("val/mean_mbo_c", mean_mbo_c, sync_dist=True)
 
         for m in self.metrics.values():
             for metric in m.values():
