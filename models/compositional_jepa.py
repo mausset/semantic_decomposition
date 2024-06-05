@@ -56,7 +56,7 @@ class CompositionalJEPA(pl.LightningModule):
                 "linear": nn.Linear(dim, n_prototypes, bias=False),
             }
         )
-        self.teacher = copy.deepcopy(self.student).eval().requires_grad_(False)
+        self.teacher = copy.deepcopy(self.student).requires_grad_(False)
         self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -139,16 +139,16 @@ class CompositionalJEPA(pl.LightningModule):
 
         predictions = F.normalize(predictions, p=2, dim=-1)
         predictions = self.student["linear"](predictions)
-        predictions = predictions.sum(dim=1)
+        predictions = predictions.sum(dim=1) / self.tau
 
         targets = F.normalize(targets, p=2, dim=-1)
         targets = self.teacher["linear"](targets)
         targets = targets.sum(dim=1)
         self.centering_list.append(targets.mean(dim=0))
 
-        predictions = F.softmax(predictions / self.tau, dim=-1)
         targets = F.softmax(targets - self.centering / self.tau, dim=-1)
 
+        # Expects predictions to be logits, not probabilities
         loss = self.loss_fn(predictions, targets)
 
         return loss, attn_map
