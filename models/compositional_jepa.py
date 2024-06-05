@@ -25,6 +25,7 @@ class CompositionalJEPA(pl.LightningModule):
         n_prototypes: int = 4096,
         alpha: float = 0.996,
         tau: float = 0.04,
+        gamma: float = 0.9,
         n_slots=8,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -72,6 +73,7 @@ class CompositionalJEPA(pl.LightningModule):
         self.dim = dim
         self.alpha = alpha
         self.tau = tau
+        self.gamma = gamma
         self.n_prototypes = n_prototypes
         self.n_slots = n_slots
         self.optimizer = optimizer
@@ -187,7 +189,10 @@ class CompositionalJEPA(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         self.update_teacher()
-        self.centering.data = torch.stack(self.centering_list).mean(dim=0)
+        self.centering.data = self.centering.data * self.gamma + torch.stack(
+            self.centering_list
+        ).mean(dim=0) * (1 - self.gamma)
+        self.centering_list = []
         super().optimizer_step(*args, **kwargs)
 
     def configure_optimizers(self):
