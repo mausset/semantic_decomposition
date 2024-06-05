@@ -54,15 +54,18 @@ class CompositionalJEPA(pl.LightningModule):
                 #     nn.GELU(),
                 #     nn.Linear(4 * dim, dim),
                 # ),
-                "linear": nn.utils.weight_norm(
-                    nn.Linear(dim, n_prototypes, bias=False)
-                ),
+                "linear": nn.Linear(dim, n_prototypes, bias=False),
             }
         )
 
+        self.teacher = copy.deepcopy(self.student).requires_grad_(False)
+
+        self.student["linear"] = nn.utils.weight_norm(self.student["linear"])
         self.student["linear"].weight_g.data.fill_(1).requires_grad_(False)
 
-        self.teacher = copy.deepcopy(self.student).requires_grad_(False)
+        self.teacher["linear"] = nn.utils.weight_norm(self.teacher["linear"])
+        self.teacher["linear"].weight_g.data.fill_(1).requires_grad_(False)
+
         self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
