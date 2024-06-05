@@ -4,8 +4,7 @@ import lightning as pl
 import timm
 import torch
 import torch.nn.functional as F
-from einops import rearrange
-from geomloss import SamplesLoss
+from einops import rearrange, repeat
 from models.slot_attention import SA
 from torch import nn
 from torch.optim import AdamW
@@ -23,8 +22,9 @@ class CompositionalJEPA(pl.LightningModule):
         predictor_args: dict,
         dim: int,
         resolution: tuple[int, int],
-        weighted: bool = False,
+        n_prototypes: int = 4096,
         alpha: float = 0.996,
+        tau: float = 0.04,
         n_slots=8,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -42,50 +42,41 @@ class CompositionalJEPA(pl.LightningModule):
             .requires_grad_(False)
         )
 
-        self.slot_attention = SA(**slot_attention_args, n_slots=n_slots)
-        self.teacher = copy.deepcopy(self.slot_attention).requires_grad_(False)
-
-        self.predictor = Encoder(**predictor_args)
-
-        if weighted:
-            self.weighter = nn.Linear(dim, 1, bias=False)
-            self.teacher_weighter = copy.deepcopy(self.weighter).requires_grad_(False)
-
+        self.student = nn.ModuleDict(
+            {
+                "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
+                "predictor": Encoder(**predictor_args),
+                # "ffn": nn.Sequential(
+                #     nn.Linear(dim, 4 * dim),
+                #     nn.GELU(),
+                #     nn.Linear(4 * dim, 4 * dim),
+                #     nn.GELU(),
+                #     nn.Linear(4 * dim, dim),
+                # ),
+                "linear": nn.Linear(dim, n_prototypes, bias=False),
+            }
+        )
+        self.teacher = copy.deepcopy(self.student).eval().requires_grad_(False)
         self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
-        self.dim = dim
         self.resolution = resolution
-        self.feature_resolution = (
-            self.resolution[0] // self.patch_size,
-            self.resolution[1] // self.patch_size,
-        )
-        self.loss_fn = SamplesLoss("sinkhorn", p=2, blur=0.05)
+        self.loss_fn = nn.CrossEntropyLoss()
 
-        self.weighted = weighted
+        self.centering_list = []
+        self.centering = nn.Parameter(
+            torch.zeros(n_prototypes, device=self.device), requires_grad=False
+        )
+
+        self.dim = dim
         self.alpha = alpha
+        self.tau = tau
+        self.n_prototypes = n_prototypes
         self.n_slots = n_slots
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
         self.log_img = True
-
-    def update_teacher(self):
-        for teacher_param, student_param in zip(
-            self.teacher.parameters(), self.slot_attention.parameters()
-        ):
-            teacher_param.data = (
-                teacher_param.data * self.alpha + student_param.data * (1 - self.alpha)
-            )
-
-        if self.weighted:
-            for teacher_param, student_param in zip(
-                self.teacher_weighter.parameters(), self.weighter.parameters()
-            ):
-                teacher_param.data = (
-                    teacher_param.data * self.alpha
-                    + student_param.data * (1 - self.alpha)
-                )
 
     # Shorthand
     def forward_features(self, x):
@@ -100,52 +91,65 @@ class CompositionalJEPA(pl.LightningModule):
 
         return mask
 
+    def update_teacher(self):
+        for t, s in zip(self.teacher.parameters(), self.student.parameters()):
+            t.data = t.data * self.alpha + s.data * (1 - self.alpha)
+
+    def get_pe(self, b, t, n, d):
+        pe = self.positional_encoding(torch.zeros((b, t, d), device=self.device))
+
+        return repeat(pe, "b t d -> b t n d", n=n)
+
     def common_step(self, x, stage="train"):
-        _, t, *_ = x.shape
+        b, t, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
 
         features = self.forward_features(x)
+        student_features = rearrange(features, "(b t) ... -> b t ...", b=b)[:, :-1]
+        student_features = rearrange(student_features, "b t ... -> (b t) ...")
+        teacher_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
+        teacher_features = rearrange(teacher_features, "b t ... -> (b t) ...")
 
-        slots, attn_map = self.slot_attention(features, n_slots=self.n_slots)
-        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
-        slots = slots[:, :-1]
-        slots = rearrange(slots, "b t n d -> (b n) t d")
+        slots, attn_map = self.student["slot_attention"](
+            student_features, n_slots=self.n_slots
+        )
+        slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
 
         if stage == "train":
-            tmp = rearrange(slots, "b tn d -> (b tn) d")
+            tmp = rearrange(slots, "b t n d -> (b t n) d")
             self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
             self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
 
-        pe = self.positional_encoding(slots)
-        slots = slots + pe
-        slots = rearrange(slots, "(b n) t d -> b (t n) d", n=self.n_slots)
+        slots = slots + self.get_pe(b, t - 1, self.n_slots, self.dim)
+        slots = rearrange(slots, "b t n d -> b (t n) d", n=self.n_slots)
 
         mask = self.gen_mask(t - 1, self.n_slots)
-
-        predictions = self.predictor(slots, attn_mask=mask)
+        predictions = self.student["predictor"](slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
-        targets, _ = self.teacher(features, n_slots=self.n_slots)
-        targets = rearrange(targets, "(b t) n d -> b t n d", t=t)
-        targets = targets[:, 1:]
-        targets = rearrange(targets, "b t n d -> (b t) n d")
+        targets, _ = self.teacher["slot_attention"](
+            teacher_features, n_slots=self.n_slots
+        )
 
         if stage == "train":
             tmp = rearrange(targets, "bt n d -> (bt n) d")
             self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
             self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
-        if self.weighted:
-            weights_pred = self.weighter(predictions)
-            weights_pred = F.softmax(weights_pred, dim=1)
-            weights_target = self.teacher_weighter(targets)
-            weights_target = F.softmax(weights_target, dim=1)
-            loss = self.loss_fn(
-                weights_pred, predictions, weights_target, targets
-            ).mean()
-        else:
-            loss = self.loss_fn(predictions, targets).mean()
+        predictions = F.normalize(predictions, p=2, dim=-1)
+        predictions = self.student["linear"](predictions)
+        predictions = predictions.sum(dim=1)
+
+        targets = F.normalize(targets, p=2, dim=-1)
+        targets = self.teacher["linear"](targets)
+        targets = targets.sum(dim=1)
+        self.centering_list.append(targets.mean(dim=0))
+
+        predictions = F.softmax(predictions / self.tau, dim=-1)
+        targets = F.softmax(targets - self.centering / self.tau, dim=-1)
+
+        loss = self.loss_fn(predictions, targets)
 
         return loss, attn_map
 
@@ -183,6 +187,7 @@ class CompositionalJEPA(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         self.update_teacher()
+        self.centering.data = torch.stack(self.centering_list).mean(dim=0)
         super().optimizer_step(*args, **kwargs)
 
     def configure_optimizers(self):
