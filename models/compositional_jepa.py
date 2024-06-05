@@ -54,9 +54,14 @@ class CompositionalJEPA(pl.LightningModule):
                 #     nn.GELU(),
                 #     nn.Linear(4 * dim, dim),
                 # ),
-                "linear": nn.Linear(dim, n_prototypes, bias=False),
+                "linear": nn.utils.weight_norm(
+                    nn.Linear(dim, n_prototypes, bias=False)
+                ),
             }
         )
+
+        self.student["linear"].weight_g.data.fill_(1).requires_grad_(False)
+
         self.teacher = copy.deepcopy(self.student).requires_grad_(False)
         self.positional_encoding = PositionalEncoding1D(dim)
 
