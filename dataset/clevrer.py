@@ -117,7 +117,7 @@ class CLEVRER(pl.LightningDataModule):
         return DataLoader(
             self.val,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=1,
             persistent_workers=True,
             shuffle=True,
         )

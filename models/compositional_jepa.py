@@ -42,10 +42,6 @@ class CompositionalJEPA(pl.LightningModule):
             .requires_grad_(False)
         )
 
-        prototypes = nn.Parameter(
-            nn.init.kaiming_normal_(torch.empty(n_prototypes, dim))
-        )
-
         self.student = nn.ModuleDict(
             {
                 "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
