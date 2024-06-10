@@ -42,6 +42,9 @@ class CompositionalJEPA(pl.LightningModule):
             .requires_grad_(False)
         )
 
+        self.positional_encoding = PositionalEncoding1D(dim)
+        prototypes = self.positional_encoding(torch.empty(1, n_prototypes, dim)).squeeze(0)
+
         self.student = nn.ModuleDict(
             {
                 "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
@@ -49,17 +52,16 @@ class CompositionalJEPA(pl.LightningModule):
                 "prototypes": nn.ParameterList(  # SO goofy
                     [
                         nn.Parameter(
-                            nn.init.kaiming_normal_(torch.empty(n_prototypes, dim))
+                            prototypes
                         )
                     ]
-                ),
+                ).requires_grad_(False),
                 "decoder": Encoder(**decoder_args, cross_attend=True),
             }
         )
 
         self.teacher = copy.deepcopy(self.student).requires_grad_(False)
 
-        self.positional_encoding = PositionalEncoding1D(dim)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
