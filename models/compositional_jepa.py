@@ -25,7 +25,7 @@ class CompositionalJEPA(pl.LightningModule):
         resolution: tuple[int, int],
         n_prototypes: int = 16,
         n_slots=8,
-        sacrificial_patches: bool = False,
+        sacrificial_patches: int = 0,
         alpha: float = 0.996,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
