@@ -61,7 +61,7 @@ class CompositionalJEPA(pl.LightningModule):
 
         if sacrificial_patches:
             self.student["additional"]["sacrificial"] = nn.Parameter(
-                nn.init.kaiming_normal_(torch.empty(n_slots - 1, dim))
+                nn.init.kaiming_normal_(torch.empty(sacrificial_patches, dim))
             )
 
         self.teacher = copy.deepcopy(self.student).requires_grad_(False)
@@ -125,7 +125,7 @@ class CompositionalJEPA(pl.LightningModule):
             s_features, n_slots=self.n_slots
         )
         if self.sacrificial_patches:
-            s_attn_map = s_attn_map[:, : 1 - self.n_slots]
+            s_attn_map = s_attn_map[:, : -self.sacrificial_patches]
         slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
         slots = slots + self.get_pe(b, t - 1, self.n_slots, self.dim)
         slots = rearrange(slots, "b t n d -> b (t n) d", n=self.n_slots)
@@ -146,7 +146,7 @@ class CompositionalJEPA(pl.LightningModule):
             t_features, n_slots=self.n_slots
         )
         if self.sacrificial_patches:
-            t_attn_map = t_attn_map[:, : 1 - self.n_slots]
+            t_attn_map = t_attn_map[:, : -self.sacrificial_patches]
 
         s_prototypes = repeat(
             self.student["additional"]["prototypes"],
