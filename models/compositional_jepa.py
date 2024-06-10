@@ -24,8 +24,9 @@ class CompositionalJEPA(pl.LightningModule):
         dim: int,
         resolution: tuple[int, int],
         n_prototypes: int = 16,
-        alpha: float = 0.996,
         n_slots=8,
+        sacrificial_patches: bool = False,
+        alpha: float = 0.996,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
     ):
@@ -43,25 +44,27 @@ class CompositionalJEPA(pl.LightningModule):
         )
 
         self.positional_encoding = PositionalEncoding1D(dim)
-        prototypes = self.positional_encoding(torch.empty(1, n_prototypes, dim)).squeeze(0)
+        prototypes = self.positional_encoding(
+            torch.empty(1, n_prototypes, dim)
+        ).squeeze(0)
 
         self.student = nn.ModuleDict(
             {
                 "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
                 "predictor": Encoder(**predictor_args),
-                "prototypes": nn.ParameterList(  # SO goofy
-                    [
-                        nn.Parameter(
-                            prototypes
-                        )
-                    ]
-                ).requires_grad_(False),
                 "decoder": Encoder(**decoder_args, cross_attend=True),
+                "additional": nn.ParameterDict(
+                    {"prototypes": nn.Parameter(prototypes).requires_grad_(False)}
+                ),
             }
         )
 
-        self.teacher = copy.deepcopy(self.student).requires_grad_(False)
+        if sacrificial_patches:
+            self.student["additional"]["sacrificial"] = nn.Parameter(
+                nn.init.kaiming_normal_(torch.empty(n_slots - 1, dim))
+            )
 
+        self.teacher = copy.deepcopy(self.student).requires_grad_(False)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
@@ -72,6 +75,7 @@ class CompositionalJEPA(pl.LightningModule):
         self.alpha = alpha
         self.n_prototypes = n_prototypes
         self.n_slots = n_slots
+        self.sacrificial_patches = sacrificial_patches
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
         self.log_img = True
@@ -109,9 +113,19 @@ class CompositionalJEPA(pl.LightningModule):
         t_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
         t_features = rearrange(t_features, "b t ... -> (b t) ...")
 
-        slots, attn_map = self.student["slot_attention"](
+        if self.sacrificial_patches:
+            sacrificial_patches = repeat(
+                self.student["additional"]["sacrificial"],
+                "n d -> b n d",
+                b=s_features.shape[0],
+            )
+            s_features = torch.cat([s_features, sacrificial_patches], dim=1)
+
+        slots, s_attn_map = self.student["slot_attention"](
             s_features, n_slots=self.n_slots
         )
+        if self.sacrificial_patches:
+            s_attn_map = s_attn_map[:, : 1 - self.n_slots]
         slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
         slots = slots + self.get_pe(b, t - 1, self.n_slots, self.dim)
         slots = rearrange(slots, "b t n d -> b (t n) d", n=self.n_slots)
@@ -120,15 +134,29 @@ class CompositionalJEPA(pl.LightningModule):
         predictions = self.student["predictor"](slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
-        targets, _ = self.teacher["slot_attention"](t_features, n_slots=self.n_slots)
+        if self.sacrificial_patches:
+            sacrificial_patches = repeat(
+                self.teacher["additional"]["sacrificial"],
+                "n d -> b n d",
+                b=t_features.shape[0],
+            )
+            t_features = torch.cat([t_features, sacrificial_patches], dim=1)
+
+        targets, t_attn_map = self.teacher["slot_attention"](
+            t_features, n_slots=self.n_slots
+        )
+        if self.sacrificial_patches:
+            t_attn_map = t_attn_map[:, : 1 - self.n_slots]
 
         s_prototypes = repeat(
-            self.student["prototypes"][0], "n d -> b n d", b=predictions.shape[0]
+            self.student["additional"]["prototypes"],
+            "n d -> b n d",
+            b=predictions.shape[0],
         )
         s_decode = self.student["decoder"](s_prototypes, context=predictions)
 
         t_prototypes = repeat(
-            self.teacher["prototypes"][0], "n d -> b n d", b=targets.shape[0]
+            self.teacher["additional"]["prototypes"], "n d -> b n d", b=targets.shape[0]
         )
         t_decode = self.teacher["decoder"](t_prototypes, context=targets)
 
@@ -141,26 +169,32 @@ class CompositionalJEPA(pl.LightningModule):
             self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
             self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
-        # Expects predictions to be logits, not probabilities
         loss = self.loss_fn(s_decode, t_decode)
 
-        return loss, attn_map
+        return loss, s_attn_map, t_attn_map
 
     def training_step(self, x):
 
-        loss, _ = self.common_step(x)
+        loss, *_ = self.common_step(x)
         self.log("train/loss", loss.item(), prog_bar=True, sync_dist=True)
 
         return loss
 
     def validation_step(self, x):
 
-        loss, attn_map = self.common_step(x, stage="val")
+        loss, s_attn_map, t_attn_map = self.common_step(x, stage="val")
         self.log("val/loss", loss.item(), prog_bar=True, sync_dist=True)
 
-        attention_plot = plot_attention(
+        s_attention_plot = plot_attention(
             x[0][0],
-            attn_map[0],
+            s_attn_map[0],
+            res=self.resolution[0],
+            patch_size=self.patch_size,
+        )
+
+        t_attention_plot = plot_attention(
+            x[0][1],
+            t_attn_map[0],
             res=self.resolution[0],
             patch_size=self.patch_size,
         )
@@ -169,10 +203,8 @@ class CompositionalJEPA(pl.LightningModule):
             isinstance(self.logger, pl.pytorch.loggers.WandbLogger)
             and self.trainer.global_rank == 0
         ):
-            self.logger.log_image(
-                key="attention",
-                images=[attention_plot],
-            )
+            self.logger.log_image(key="attention_student", images=[s_attention_plot])
+            self.logger.log_image(key="attention_teacher", images=[t_attention_plot])
 
         return loss
 
