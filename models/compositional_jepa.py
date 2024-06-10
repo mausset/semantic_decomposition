@@ -26,6 +26,7 @@ class CompositionalJEPA(pl.LightningModule):
         n_prototypes: int = 16,
         n_slots=8,
         sacrificial_patches: int = 0,
+        sample_same=False,
         alpha: float = 0.996,
         optimizer: str = "adamw",
         optimizer_args: dict = {},
@@ -76,9 +77,9 @@ class CompositionalJEPA(pl.LightningModule):
         self.n_prototypes = n_prototypes
         self.n_slots = n_slots
         self.sacrificial_patches = sacrificial_patches
+        self.sample_same = sample_same
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
-        self.log_img = True
 
     # Shorthand
     def forward_features(self, x):
@@ -113,6 +114,11 @@ class CompositionalJEPA(pl.LightningModule):
         t_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
         t_features = rearrange(t_features, "b t ... -> (b t) ...")
 
+        sample = None
+        if self.sample_same:
+            sample = torch.randn(b, self.n_slots, self.dim, device=self.device)
+            sample = repeat(sample, "b n d -> (b t) n d", t=t - 1)
+
         if self.sacrificial_patches:
             sacrificial_patches = repeat(
                 self.student["additional"]["sacrificial"],
@@ -122,7 +128,7 @@ class CompositionalJEPA(pl.LightningModule):
             s_features = torch.cat([s_features, sacrificial_patches], dim=1)
 
         slots, s_attn_map = self.student["slot_attention"](
-            s_features, n_slots=self.n_slots
+            s_features, n_slots=self.n_slots, sample=sample
         )
         if self.sacrificial_patches:
             s_attn_map = s_attn_map[:, : -self.sacrificial_patches]
@@ -143,7 +149,7 @@ class CompositionalJEPA(pl.LightningModule):
             t_features = torch.cat([t_features, sacrificial_patches], dim=1)
 
         targets, t_attn_map = self.teacher["slot_attention"](
-            t_features, n_slots=self.n_slots
+            t_features, n_slots=self.n_slots, sample=sample
         )
         if self.sacrificial_patches:
             t_attn_map = t_attn_map[:, : -self.sacrificial_patches]

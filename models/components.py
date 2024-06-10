@@ -21,7 +21,7 @@ class GaussianPrior(nn.Module):
         if sample is None:
             sample = mu + log_sigma.exp() * torch.randn_like(mu)
         else:
-            sample = mu + sample * log_sigma.exp()
+            sample = mu + log_sigma.exp() * sample
 
         return sample
 

@@ -64,10 +64,10 @@ class SA(pl.LightningModule):
 
         return updates, attn
 
-    def sample(self, x, n_slots):
+    def sample(self, x, n_slots, sample=None):
         if isinstance(self.sampler, nn.Parameter):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
-        return self.sampler(x, n_slots)
+        return self.sampler(x, n_slots, sample=sample)
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
@@ -95,11 +95,11 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, n_slots=8):
+    def forward(self, x, n_slots=8, sample=None):
 
         x = self.norm_input(x)
 
-        init_slots = self.sample(x, n_slots)
+        init_slots = self.sample(x, n_slots, sample=sample)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
