@@ -60,11 +60,6 @@ class CompositionalJEPA(pl.LightningModule):
             }
         )
 
-        if sacrificial_patches:
-            self.student["additional"]["sacrificial"] = nn.Parameter(
-                nn.init.kaiming_normal_(torch.empty(sacrificial_patches, dim))
-            )
-
         self.teacher = copy.deepcopy(self.student).requires_grad_(False)
 
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
@@ -109,75 +104,54 @@ class CompositionalJEPA(pl.LightningModule):
         x = rearrange(x, "b t ... -> (b t) ...")
 
         features = self.forward_features(x)
-        s_features = rearrange(features, "(b t) ... -> b t ...", b=b)[:, :-1]
-        s_features = rearrange(s_features, "b t ... -> (b t) ...")
-        t_features = rearrange(features, "(b t) ... -> b t ...", t=t)[:, 1:]
-        t_features = rearrange(t_features, "b t ... -> (b t) ...")
 
         sample = None
         if self.sample_same:
             sample = torch.randn(b, self.n_slots, self.dim, device=self.device)
-            sample = repeat(sample, "b n d -> (b t) n d", t=t - 1)
-
-        if self.sacrificial_patches:
-            sacrificial_patches = repeat(
-                self.student["additional"]["sacrificial"],
-                "n d -> b n d",
-                b=s_features.shape[0],
-            )
-            s_features = torch.cat([s_features, sacrificial_patches], dim=1)
+            sample = repeat(sample, "b n d -> (b t) n d", t=t)
 
         slots, s_attn_map = self.student["slot_attention"](
-            s_features, n_slots=self.n_slots, sample=sample
+            features, n_slots=self.n_slots, sample=sample
         )
-        if self.sacrificial_patches:
-            s_attn_map = s_attn_map[:, : -self.sacrificial_patches]
-        slots = rearrange(slots, "(b t) n d -> b t n d", b=b)
-        slots = slots + self.get_pe(b, t - 1, self.n_slots, self.dim)
-        slots = rearrange(slots, "b t n d -> b (t n) d", n=self.n_slots)
+
+        context = rearrange(slots, "(b t) n d -> b t n d", b=b)[:, :-1]
+
+        context = context + self.get_pe(b, t - 1, self.n_slots, self.dim)
+        context = rearrange(context, "b t n d -> b (t n) d", n=self.n_slots)
 
         mask = self.gen_mask(t - 1, self.n_slots)
-        predictions = self.student["predictor"](slots, attn_mask=mask)
+        predictions = self.student["predictor"](context, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
-
-        if self.sacrificial_patches:
-            sacrificial_patches = repeat(
-                self.teacher["additional"]["sacrificial"],
-                "n d -> b n d",
-                b=t_features.shape[0],
-            )
-            t_features = torch.cat([t_features, sacrificial_patches], dim=1)
-
-        targets, t_attn_map = self.teacher["slot_attention"](
-            t_features, n_slots=self.n_slots, sample=sample
-        )
-        if self.sacrificial_patches:
-            t_attn_map = t_attn_map[:, : -self.sacrificial_patches]
 
         s_prototypes = repeat(
             self.student["additional"]["prototypes"],
             "n d -> b n d",
             b=predictions.shape[0],
         )
+
         s_decode = self.student["decoder"](s_prototypes, context=predictions)
 
+        target = rearrange(slots, "(b t) n d -> b t n d", b=b)[:, 1:]
+        target = rearrange(target, "b t n d -> (b t) n d")
+
         t_prototypes = repeat(
-            self.teacher["additional"]["prototypes"], "n d -> b n d", b=targets.shape[0]
+            self.teacher["additional"]["prototypes"],
+            "n d -> b n d",
+            b=predictions.shape[0],
         )
-        t_decode = self.teacher["decoder"](t_prototypes, context=targets)
+        t_decode = self.teacher["decoder"](t_prototypes, context=target)
 
-        if stage == "train":
-            tmp = rearrange(s_decode, "bt n d -> (bt n) d")
-            self.log("train/mean_norm_student", torch.norm(tmp, dim=1).mean())
-            self.log("train/mean_var_student", torch.var(tmp, dim=0).mean())
+        tmp = rearrange(s_decode, "bt n d -> (bt n) d")
+        self.log(f"{stage}/mean_norm_student", torch.norm(tmp, dim=1).mean())
+        self.log(f"{stage}/mean_var_student", torch.var(tmp, dim=0).mean())
 
-            tmp = rearrange(t_decode, "bt n d -> (bt n) d")
-            self.log("train/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
-            self.log("train/mean_var_teacher", torch.var(tmp, dim=0).mean())
+        tmp = rearrange(t_decode, "bt n d -> (bt n) d")
+        self.log(f"{stage}/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
+        self.log(f"{stage}/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
         loss = self.loss_fn(s_decode, t_decode)
 
-        return loss, s_attn_map, t_attn_map
+        return loss, s_attn_map
 
     def training_step(self, x):
 
@@ -188,7 +162,7 @@ class CompositionalJEPA(pl.LightningModule):
 
     def validation_step(self, x):
 
-        loss, s_attn_map, t_attn_map = self.common_step(x, stage="val")
+        loss, s_attn_map = self.common_step(x, stage="val")
         self.log("val/loss", loss.item(), prog_bar=True, sync_dist=True)
 
         s_attention_plot = plot_attention(
@@ -198,19 +172,11 @@ class CompositionalJEPA(pl.LightningModule):
             patch_size=self.patch_size,
         )
 
-        t_attention_plot = plot_attention(
-            x[0][1],
-            t_attn_map[0],
-            res=self.resolution[0],
-            patch_size=self.patch_size,
-        )
-
         if (
             isinstance(self.logger, pl.pytorch.loggers.WandbLogger)
             and self.trainer.global_rank == 0
         ):
             self.logger.log_image(key="attention_student", images=[s_attention_plot])
-            self.logger.log_image(key="attention_teacher", images=[t_attention_plot])
 
         return loss
 
