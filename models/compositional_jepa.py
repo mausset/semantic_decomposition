@@ -9,7 +9,10 @@ from models.slot_attention import SA
 from torch import nn
 from torch.optim import AdamW
 from utils.plot import plot_attention
-from positional_encodings.torch_encodings import PositionalEncoding1D
+from positional_encodings.torch_encodings import (
+    PositionalEncoding1D,
+    PositionalEncoding2D,
+)
 from x_transformers import Encoder
 from geomloss import SamplesLoss
 
@@ -26,7 +29,6 @@ class CompositionalJEPA(pl.LightningModule):
         resolution: tuple[int, int],
         n_prototypes: int = 16,
         n_slots=8,
-        sacrificial_patches: int = 0,
         sample_same=False,
         alpha: float = 0.996,
         optimizer: str = "adamw",
@@ -45,19 +47,11 @@ class CompositionalJEPA(pl.LightningModule):
             .requires_grad_(False)
         )
 
-        self.positional_encoding = PositionalEncoding1D(dim)
-        prototypes = self.positional_encoding(
-            torch.empty(1, n_prototypes, dim)
-        ).squeeze(0)
-
         self.student = nn.ModuleDict(
             {
                 "slot_attention": SA(**slot_attention_args, n_slots=n_slots),
                 "predictor": Encoder(**predictor_args),
                 "decoder": Encoder(**decoder_args, cross_attend=True),
-                "additional": nn.ParameterDict(
-                    {"prototypes": nn.Parameter(prototypes).requires_grad_(False)}
-                ),
             }
         )
 
@@ -69,11 +63,22 @@ class CompositionalJEPA(pl.LightningModule):
         # self.loss_fn = nn.MSELoss()
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
 
+        self.positional_encoding = PositionalEncoding1D(dim)
+
+        self.pe2d = PositionalEncoding2D(dim)(
+            torch.empty(
+                1,
+                self.resolution[0] // self.patch_size,
+                self.resolution[1] // self.patch_size,
+                dim,
+            )
+        )
+        self.pe2d = rearrange(self.pe2d, "b h w d -> b (h w) d")
+
         self.dim = dim
         self.alpha = alpha
         self.n_prototypes = n_prototypes
         self.n_slots = n_slots
-        self.sacrificial_patches = sacrificial_patches
         self.sample_same = sample_same
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
@@ -125,34 +130,22 @@ class CompositionalJEPA(pl.LightningModule):
         predictions = self.student["predictor"](context, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
-        # s_prototypes = repeat(
-        #     self.student["additional"]["prototypes"],
-        #     "n d -> b n d",
-        #     b=predictions.shape[0],
-        # )
+        pred_dec = self.student["decoder"](
+            self.pe2d.to(self.device), context=predictions
+        )
 
-        # s_decode = self.student["decoder"](s_prototypes, context=predictions)
-
-        target_slots, _ = self.teacher["slot_attention"](features, n_slots=self.n_slots)
-        target = rearrange(target_slots, "(b t) n d -> b t n d", b=b)[:, 1:]
+        target = rearrange(features, "(b t) n d -> b t n d", b=b)[:, 1:]
         target = rearrange(target, "b t n d -> (b t) n d")
 
-        # t_prototypes = repeat(
-        #     self.teacher["additional"]["prototypes"],
-        #     "n d -> b n d",
-        #     b=predictions.shape[0],
-        # )
-        # t_decode = self.teacher["decoder"](t_prototypes, context=target)
+        loss = self.loss_fn(pred_dec, target.detach()).mean()
 
-        tmp = rearrange(predictions, "bt n d -> (bt n) d")
+        tmp = rearrange(pred_dec, "bt n d -> (bt n) d")
         self.log(f"{stage}/mean_norm_student", torch.norm(tmp, dim=1).mean())
         self.log(f"{stage}/mean_var_student", torch.var(tmp, dim=0).mean())
 
-        tmp = rearrange(target, "bt n d -> (bt n) d")
-        self.log(f"{stage}/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
-        self.log(f"{stage}/mean_var_teacher", torch.var(tmp, dim=0).mean())
-
-        loss = self.loss_fn(predictions, target.detach()).mean()
+        # tmp = rearrange(target, "bt n d -> (bt n) d")
+        # self.log(f"{stage}/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
+        # self.log(f"{stage}/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
         return loss, s_attn_map
 
