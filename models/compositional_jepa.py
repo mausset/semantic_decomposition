@@ -11,6 +11,7 @@ from torch.optim import AdamW
 from utils.plot import plot_attention
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from x_transformers import Encoder
+from geomloss import SamplesLoss
 
 
 class CompositionalJEPA(pl.LightningModule):
@@ -65,7 +66,8 @@ class CompositionalJEPA(pl.LightningModule):
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
         self.resolution = resolution
-        self.loss_fn = nn.MSELoss()
+        # self.loss_fn = nn.MSELoss()
+        self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
 
         self.dim = dim
         self.alpha = alpha
@@ -91,7 +93,7 @@ class CompositionalJEPA(pl.LightningModule):
 
     def update_teacher(self):
         for t, s in zip(self.teacher.parameters(), self.student.parameters()):
-            t.data = t.data * self.alpha + s.data * (1 - self.alpha)
+            t.data.mul_(self.alpha).add_(s.detach().data * (1 - self.alpha))
 
     def get_pe(self, b, t, n, d):
         pe = self.positional_encoding(torch.zeros((b, t, d), device=self.device))
@@ -123,33 +125,34 @@ class CompositionalJEPA(pl.LightningModule):
         predictions = self.student["predictor"](context, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", n=self.n_slots)
 
-        s_prototypes = repeat(
-            self.student["additional"]["prototypes"],
-            "n d -> b n d",
-            b=predictions.shape[0],
-        )
+        # s_prototypes = repeat(
+        #     self.student["additional"]["prototypes"],
+        #     "n d -> b n d",
+        #     b=predictions.shape[0],
+        # )
 
-        s_decode = self.student["decoder"](s_prototypes, context=predictions)
+        # s_decode = self.student["decoder"](s_prototypes, context=predictions)
 
-        target = rearrange(slots, "(b t) n d -> b t n d", b=b)[:, 1:]
+        target_slots, _ = self.teacher["slot_attention"](features, n_slots=self.n_slots)
+        target = rearrange(target_slots, "(b t) n d -> b t n d", b=b)[:, 1:]
         target = rearrange(target, "b t n d -> (b t) n d")
 
-        t_prototypes = repeat(
-            self.teacher["additional"]["prototypes"],
-            "n d -> b n d",
-            b=predictions.shape[0],
-        )
-        t_decode = self.teacher["decoder"](t_prototypes, context=target)
+        # t_prototypes = repeat(
+        #     self.teacher["additional"]["prototypes"],
+        #     "n d -> b n d",
+        #     b=predictions.shape[0],
+        # )
+        # t_decode = self.teacher["decoder"](t_prototypes, context=target)
 
-        tmp = rearrange(s_decode, "bt n d -> (bt n) d")
+        tmp = rearrange(predictions, "bt n d -> (bt n) d")
         self.log(f"{stage}/mean_norm_student", torch.norm(tmp, dim=1).mean())
         self.log(f"{stage}/mean_var_student", torch.var(tmp, dim=0).mean())
 
-        tmp = rearrange(t_decode, "bt n d -> (bt n) d")
+        tmp = rearrange(target, "bt n d -> (bt n) d")
         self.log(f"{stage}/mean_norm_teacher", torch.norm(tmp, dim=1).mean())
         self.log(f"{stage}/mean_var_teacher", torch.var(tmp, dim=0).mean())
 
-        loss = self.loss_fn(s_decode, t_decode)
+        loss = self.loss_fn(predictions, target.detach()).mean()
 
         return loss, s_attn_map
 
