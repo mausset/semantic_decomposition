@@ -1,6 +1,14 @@
 import torch
 
 
+def block_causal_mask(t, n, device):
+    mask = torch.triu(torch.ones(t * n, t * n, device=device)).bool()
+    for i in range(t):
+        mask[i * n : (i + 1) * n, i * n : (i + 1) * n] = True
+
+    return mask
+
+
 def compute_combined_attn(attn_list, attn_maps):
     if len(attn_list) == 0:
         return attn_maps[0]

@@ -1,3 +1,4 @@
+import torch
 from lightning.pytorch.cli import LightningCLI, SaveConfigCallback
 from lightning.pytorch.loggers import WandbLogger
 import wandb
@@ -28,6 +29,8 @@ class MySaveConfigCallback(SaveConfigCallback):
 
 
 def main():
+    torch.set_printoptions(precision=4, linewidth=200, sci_mode=False)
+
     LightningCLI(
         parser_kwargs={"parser_mode": "omegaconf"},
         save_config_callback=MySaveConfigCallback,

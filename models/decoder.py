@@ -1,13 +1,12 @@
 import lightning as pl
-from einops import repeat
 from torch import nn
 from torch.nn import functional as F
 from models.positional_encoding import FourierScaffold
 from x_transformers import Encoder
-from models.components import GaussianPrior
+from models.components import PE2D
 
 
-class TransformerDecoder(pl.LightningModule):
+class TransformerDecoderV1(pl.LightningModule):
 
     def __init__(self, dim, depth, pos_enc=None) -> None:
         super().__init__()
@@ -50,3 +49,31 @@ class TransformerDecoder(pl.LightningModule):
         attn_map = hiddens.attn_intermediates[-1].post_softmax_attn.mean(dim=1)
 
         return result, attn_map
+
+
+class TransformerDecoder(nn.Module):
+
+    def __init__(self, decoder_args) -> None:
+        super().__init__()
+
+        self.pe = PE2D(decoder_args["dim"])
+        self.transformer = Encoder(**decoder_args)
+
+    def forward(self, x, resolution, mask=None, context_mask=None):
+        """
+        args:
+            x: (B, N, D), extracted object representations
+        returns:
+            (B, HW, D), decoded features
+        """
+
+        target = self.pe(x, resolution)
+
+        result = self.transformer(
+            target,
+            mask=mask,
+            context=x,
+            context_mask=context_mask,
+        )
+
+        return result

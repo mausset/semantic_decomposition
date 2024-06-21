@@ -1,7 +1,21 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from einops import repeat
+from einops import repeat, rearrange
+from positional_encodings.torch_encodings import PositionalEncoding2D
+
+
+class PE2D(nn.Module):
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.pe = PositionalEncoding2D(dim)
+
+    def forward(self, x, res):
+        b, *_ = x.shape
+        pe = self.pe(torch.empty((b, *res, self.dim), device=x.device))
+        return rearrange(pe, "b h w d -> b (h w) d")
 
 
 class GaussianPrior(nn.Module):

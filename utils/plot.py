@@ -16,6 +16,37 @@ def denormalize_imagenet(img):
     return Normalize((-mean / std).tolist(), (1.0 / std).tolist())(img)
 
 
+def plot_attention_interpreter(
+    imgs,
+    attn_maps,
+    res=224,
+    patch_size=14,
+    palette="tab20",
+    alpha=0.4,
+    include_original=False,
+):
+    b, _, n = attn_maps.shape
+
+    img = denormalize_imagenet(imgs)
+
+    palette = np.array(sns.color_palette(palette, n))
+    colors = torch.tensor(palette[:, :3], dtype=torch.float32).to(img.device)
+    colors = repeat(colors, "n c -> 1 n c 1 1")
+
+    cat_imgs = []
+    attn_map = rearrange(attn_maps, "b (h w) n -> b n h w", h=res // patch_size)
+    attn_map = F.interpolate(attn_map, scale_factor=patch_size, mode="bilinear")
+    max_idx = attn_map.argmax(dim=1)
+
+    attn_mask = F.one_hot(max_idx, num_classes=n).float().permute(0, 3, 1, 2)
+
+    attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
+    segment = (colors * attn_mask).sum(dim=1)
+    segmented_img = img * alpha + segment * (1 - alpha)
+
+    return segmented_img
+
+
 def plot_attention(
     img,
     attn_map,
