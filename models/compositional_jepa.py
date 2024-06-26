@@ -12,7 +12,10 @@ from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim import AdamW
 from utils.helpers import block_causal_mask
-from utils.plot import plot_attention_interpreter
+from utils.plot import (
+    plot_attention_interpreter,
+    plot_attention_interpreter_hierarchical,
+)
 from x_transformers import Encoder
 
 
@@ -208,59 +211,72 @@ class CompositionalJEPA(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v.item(), sync_dist=True)
 
-        attn_plot = self.plot_hierarchy(x, attn_maps) * 255
+        # attn_plots = self.plot_hierarchy(x, attn_maps) * 255
+        attn_plots = plot_attention_interpreter_hierarchical(
+            x,
+            attn_maps,
+            self.shrink_factor,
+            self.level_schedule,
+            self.level_stage,
+            self.n_levels,
+            self.resolution,
+            self.patch_size,
+        )
+
         if (
             isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
             and self.trainer.global_rank == 0
         ):
-            self.logger.experiment.log(  # type: ignore
-                {"attention": wandb.Video(attn_plot.cpu().numpy(), fps=8, format="gif")}
-            )
+            log_dict = {}
+            for idx, attn in enumerate(attn_plots):
+                log_dict[f"attention_{idx}"] = wandb.Video(
+                    attn.cpu().numpy() * 255, fps=8, format="gif"
+                )
+
+            self.logger.experiment.log(log_dict)  # type: ignore
 
         loss = torch.stack(list(losses.values())).sum()
 
         return loss
 
-    def plot_hierarchy(self, x, attn_maps):
-
-        attn_hierarchy = []
-        for i in range(len(attn_maps)):
-            t = min(
-                self.shrink_factor ** (self.n_levels - i - 1),
-                self.level_schedule[self.level_stage]["t"],
-            )
-            attn_hierarchy.append(attn_maps[i][:t])
-        attn_hierarchy = attn_hierarchy[::-1]
-
-        propagated_attn = []
-        for i in range(len(attn_hierarchy)):
-
-            a = attn_hierarchy[i]
-
-            for a_ in attn_hierarchy[i + 1 :]:
-                a = rearrange(a, "b (s n) m -> (b s) n m", s=self.shrink_factor)
-                a = torch.bmm(a_, a)
-
-            propagated_attn.append(a)
-
-        attn_plots = []
-        for p_attn in reversed(propagated_attn):
-            t = min(
-                self.shrink_factor ** (self.n_levels - 1),
-                self.level_schedule[self.level_stage]["t"],
-            )
-            attn_plots.append(
-                plot_attention_interpreter(
-                    x[0][:t],
-                    p_attn,
-                    res=self.resolution[0],
-                    patch_size=self.patch_size,
-                )
-            )
-
-        attn_plots = torch.cat(attn_plots, dim=-1)
-
-        return attn_plots
+    # def plot_hierarchy(self, x, attn_maps):
+    #
+    #     attn_hierarchy = []
+    #     for i in range(len(attn_maps)):
+    #         t = min(
+    #             self.shrink_factor ** (self.n_levels - i - 1),
+    #             self.level_schedule[self.level_stage]["t"],
+    #         )
+    #         attn_hierarchy.append(attn_maps[i][:t])
+    #     attn_hierarchy = attn_hierarchy[::-1]
+    #
+    #     propagated_attn = []
+    #     for i in range(len(attn_hierarchy)):
+    #
+    #         a = attn_hierarchy[i]
+    #
+    #         for a_ in attn_hierarchy[i + 1 :]:
+    #             a = rearrange(a, "b (s n) m -> (b s) n m", s=self.shrink_factor)
+    #             a = torch.bmm(a_, a)
+    #
+    #         propagated_attn.append(a)
+    #
+    #     attn_plots = []
+    #     for p_attn in reversed(propagated_attn):
+    #         t = min(
+    #             self.shrink_factor ** (self.n_levels - 1),
+    #             self.level_schedule[self.level_stage]["t"],
+    #         )
+    #         attn_plots.append(
+    #             plot_attention_interpreter(
+    #                 x[0][:t],
+    #                 p_attn,
+    #                 res=self.resolution[0],
+    #                 patch_size=self.patch_size,
+    #             )
+    #         )
+    #
+    #     return attn_plots
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
