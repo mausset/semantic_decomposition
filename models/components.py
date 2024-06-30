@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from einops import repeat, rearrange
 from positional_encodings.torch_encodings import PositionalEncoding2D
+from x_transformers import Encoder
 
 
 class PE2D(nn.Module):
@@ -16,6 +17,32 @@ class PE2D(nn.Module):
         b, *_ = x.shape
         pe = self.pe(torch.empty((b, *res, self.dim), device=x.device))
         return rearrange(pe, "b h w d -> b (h w) d")
+
+
+class GaussianDependent(nn.Module):
+
+    def __init__(self, dim):
+        super().__init__()
+
+        self.dim = dim
+
+        self.encoder = Encoder(
+            dim=dim,
+            depth=4,
+            ff_glu=True,
+            ff_swish=True,
+            attn_flash=True,
+            # cross_attend=True,
+        )
+
+    def forward(self, x, n, sample=None):
+        b, _, _ = x.shape
+
+        sample = (
+            torch.randn(b, n, self.dim, device=x.device) if sample is None else sample
+        )
+
+        return self.encoder(sample)  # , context=x)
 
 
 class GaussianPrior(nn.Module):

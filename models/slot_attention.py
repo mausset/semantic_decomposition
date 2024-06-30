@@ -3,7 +3,7 @@ import torch
 from einops import rearrange, repeat
 from torch import nn
 
-from models.components import SwiGLUFFN, GaussianPrior
+from models.components import SwiGLUFFN, GaussianPrior, GaussianDependent
 
 
 class SA(pl.LightningModule):
@@ -30,6 +30,8 @@ class SA(pl.LightningModule):
 
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
+        elif sampler == "gaussian_dependent":
+            self.sampler = GaussianDependent(slot_dim)
         elif sampler == "learnable_embedding":
             self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
@@ -67,7 +69,7 @@ class SA(pl.LightningModule):
     def sample(self, x, n_slots, sample=None):
         if isinstance(self.sampler, nn.Parameter):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
-        return self.sampler(x, n_slots, sample=sample)
+        return self.sampler(x, n_slots, sample=sample)  # type: ignore
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape

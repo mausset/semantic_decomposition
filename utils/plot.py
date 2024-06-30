@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 from torch.nn import functional as F
 from torchvision.transforms import Normalize
 
+from functools import reduce
+from operator import mul
+
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -50,40 +53,35 @@ def plot_attention_interpreter(
 def plot_attention_interpreter_hierarchical(
     x,
     attn_maps,
-    shrink_factor,
-    level_schedule,
-    level_stage,
-    n_levels,
+    shrink_factors,
+    t_max,
     res,
     patch_size,
 ):
 
     attn_hierarchy = []
+    total_shrink = int(reduce(mul, shrink_factors, 1))
     for i in range(len(attn_maps)):
-        t = min(
-            shrink_factor ** (n_levels - i - 1),
-            level_schedule[level_stage]["t"],
-        )
+        total_shrink //= shrink_factors[i]
+        t = min(total_shrink, t_max)
         attn_hierarchy.append(attn_maps[i][:t])
+
     attn_hierarchy = attn_hierarchy[::-1]
+    backward_sf = shrink_factors[: len(attn_hierarchy)][::-1]
 
     propagated_attn = []
     for i in range(len(attn_hierarchy)):
 
         a = attn_hierarchy[i]
-
-        for a_ in attn_hierarchy[i + 1 :]:
-            a = rearrange(a, "b (s n) m -> (b s) n m", s=shrink_factor)
+        for a_, sf in zip(attn_hierarchy[i + 1 :], backward_sf[i:]):
+            a = rearrange(a, "b (s n) m -> (b s) n m", s=sf)
             a = torch.bmm(a_, a)
 
         propagated_attn.append(a)
 
     attn_plots = []
+    t = min(t_max, int(reduce(mul, shrink_factors, 1)))
     for p_attn in reversed(propagated_attn):
-        t = min(
-            shrink_factor ** (n_levels - 1),
-            level_schedule[level_stage]["t"],
-        )
         attn_plots.append(
             plot_attention_interpreter(
                 x[0][:t],
