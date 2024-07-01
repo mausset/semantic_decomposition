@@ -133,6 +133,7 @@ class CompositionalJEPA(pl.LightningModule):
         max_seq_lens: list[int] = [32, 32],
         optimizer: str = "adamw",
         optimizer_args: dict = {},
+        lr_warmup_steps: int = 0,
     ):
         super().__init__()
 
@@ -143,6 +144,7 @@ class CompositionalJEPA(pl.LightningModule):
 
         self.optimizer = optimizer
         self.optimizer_args = optimizer_args
+        self.lr_warmup_steps = lr_warmup_steps
 
         self.schedule = schedule
         self.current_config = schedule[0]
@@ -300,8 +302,22 @@ class CompositionalJEPA(pl.LightningModule):
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
 
-    def configure_optimizers(self):
-        if self.optimizer == "adamw":
-            return AdamW(self.parameters(), **self.optimizer_args)
-        else:
-            raise NotImplementedError
+    def configure_optimizers(self):  # type: ignore
+        optimzer = AdamW(self.parameters(), **self.optimizer_args)
+        if self.lr_warmup_steps == 0:
+            return optimzer
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimzer,
+            lambda step: min(step / self.lr_warmup_steps, 1.0),
+        )
+
+        config = {
+            "optimizer": optimzer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+            },
+        }
+
+        return config
