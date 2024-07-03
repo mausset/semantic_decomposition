@@ -32,7 +32,7 @@ class SA(pl.LightningModule):
             self.sampler = GaussianPrior(slot_dim)
         elif sampler == "gaussian_dependent":
             self.sampler = GaussianDependent(slot_dim)
-        elif sampler == "learnable_embedding":
+        elif sampler == "embedding":
             self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
@@ -67,9 +67,12 @@ class SA(pl.LightningModule):
         return updates, attn
 
     def sample(self, x, n_slots, sample=None):
+        if sample is not None:
+            return sample
+
         if isinstance(self.sampler, nn.Parameter):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
-        return self.sampler(x, n_slots, sample=sample)  # type: ignore
+        return self.sampler(x, n_slots)  # type: ignore
 
     def step(self, slots, k, v, return_attn=False):
         _, n, _ = slots.shape
@@ -111,7 +114,7 @@ class SA(pl.LightningModule):
             slots = self.step(slots, k, v)
 
         if self.implicit:
-            slots = slots.detach() - init_slots.detach() + init_slots
+            slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
 
         slots, attn_map = self.step(slots, k, v, return_attn=True)
 

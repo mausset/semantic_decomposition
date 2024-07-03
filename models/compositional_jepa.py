@@ -32,6 +32,7 @@ class CJEPALayer(nn.Module):
         decode_res: tuple[int, int],
         n_slots: int,
         max_seq_len: int = 32,
+        recurrent_sa: bool = False,
     ):
         super().__init__()
 
@@ -47,6 +48,7 @@ class CJEPALayer(nn.Module):
         self.decode_res = decode_res
         self.n_slots = n_slots
         self.max_seq_len = max_seq_len + 1
+        self.recurrent_sa = recurrent_sa
 
     @property
     def device(self):
@@ -80,9 +82,25 @@ class CJEPALayer(nn.Module):
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
         b, t, *_ = x.shape
-        x = rearrange(x, "b t ... -> (b t) ...")
-        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
-        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
+        if not self.recurrent_sa:
+            x = rearrange(x, "b t ... -> (b t) ...")
+            slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
+            slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
+        else:
+            slots = None
+            samples = []
+            attn_maps = []
+            for i in range(t):
+                x_i = x[:, i]
+                slots, attn_map = self.slot_attention(
+                    x_i, n_slots=self.n_slots, sample=slots
+                )
+                samples.append(slots)
+                attn_maps.append(attn_map)
+
+            slots = torch.stack(samples, dim=1)
+            attn_map = torch.stack(attn_maps, dim=1)
+            attn_map = rearrange(attn_map, "b t ... -> (b t) ...")
 
         return slots, attn_map
 
@@ -134,6 +152,7 @@ class CompositionalJEPA(pl.LightningModule):
         optimizer: str = "adamw",
         optimizer_args: dict = {},
         lr_warmup_steps: int = 0,
+        recurrent_sa: bool = False,
     ):
         super().__init__()
 
@@ -179,6 +198,7 @@ class CompositionalJEPA(pl.LightningModule):
                     decode_res=(shrink_factors[i], n_slots[i]) if i > 0 else base_res,
                     n_slots=n_slots[i],
                     max_seq_len=max_seq_lens[i],
+                    recurrent_sa=recurrent_sa,
                 )
                 for i in range(len(shrink_factors))
             ]
