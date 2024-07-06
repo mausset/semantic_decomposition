@@ -310,7 +310,7 @@ class CompositionalJEPA(pl.LightningModule):
             log_dict = {}
             for idx, attn in enumerate(attn_plots):
                 log_dict[f"attention_{idx}"] = wandb.Video(
-                    attn.cpu().numpy() * 255, fps=8, format="gif"
+                    attn.cpu().numpy() * 255, fps=6, format="gif"
                 )
 
             self.logger.experiment.log(log_dict)  # type: ignore

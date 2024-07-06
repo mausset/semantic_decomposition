@@ -33,7 +33,7 @@ def plot_attention_interpreter(
     img = denormalize_imagenet(imgs)
 
     palette = np.array(sns.color_palette(palette, n))
-    colors = torch.tensor(palette[:, :3], dtype=torch.float32).to(img.device)
+    colors = torch.tensor(palette[:, :3], dtype=torch.float16).to(img.device)
     colors = repeat(colors, "n c -> 1 n c 1 1")
 
     cat_imgs = []
@@ -45,6 +45,12 @@ def plot_attention_interpreter(
 
     attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
     segment = (colors * attn_mask).sum(dim=1)
+    # segmented_img = img * alpha
+    # for color_index in range(n):
+    #     color_mask = colors[:, color_index, :, :, :]
+    #     attn_mask_single = attn_mask[:, color_index, :, :, :]
+    #     segment = (color_mask * attn_mask_single).sum(dim=1, keepdim=True)
+    #     segmented_img += segment * (1 - alpha)
     segmented_img = img * alpha + segment * (1 - alpha)
 
     return segmented_img
@@ -59,32 +65,43 @@ def plot_attention_interpreter_hierarchical(
     patch_size,
 ):
 
-    attn_hierarchy = []
     total_shrink = int(reduce(mul, shrink_factors, 1))
-    for i in range(len(attn_maps)):
-        total_shrink //= shrink_factors[i]
-        t = min(total_shrink, t_max)
-        attn_hierarchy.append(attn_maps[i][:t])
+    multiples = t_max // total_shrink
 
-    attn_hierarchy = attn_hierarchy[::-1]
-    backward_sf = shrink_factors[: len(attn_hierarchy)][::-1]
+    comb_attn = []
 
-    propagated_attn = []
-    for i in range(len(attn_hierarchy)):
+    for j in range(multiples):
+        t = t_max
+        attn_hierarchy = []
+        total_shrink = int(reduce(mul, shrink_factors, 1))
+        for i in range(len(attn_maps)):
+            total_shrink //= shrink_factors[i]
+            t = min(total_shrink, t_max)
+            attn_hierarchy.append(attn_maps[i][t * j : t * (j + 1)])
 
-        a = attn_hierarchy[i]
-        for a_, sf in zip(attn_hierarchy[i + 1 :], backward_sf[i:]):
-            a = rearrange(a, "b (s n) m -> (b s) n m", s=sf)
-            a = torch.bmm(a_, a)
+        attn_hierarchy = attn_hierarchy[::-1]
+        backward_sf = shrink_factors[: len(attn_hierarchy)][::-1]
 
-        propagated_attn.append(a)
+        propagated_attn = []
+        for i in range(len(attn_hierarchy)):
 
+            a = attn_hierarchy[i]
+            for a_, sf in zip(attn_hierarchy[i + 1 :], backward_sf[i:]):
+                a = rearrange(a, "b (s n) m -> (b s) n m", s=sf)
+                a = torch.bmm(a_, a)
+
+            propagated_attn.append(a)
+
+        comb_attn.append(propagated_attn)
+
+    comb_attn = list(zip(*comb_attn))
+    comb_attn = [torch.cat(attn, dim=0) for attn in comb_attn]
     attn_plots = []
-    t = min(t_max, int(reduce(mul, shrink_factors, 1)))
-    for p_attn in reversed(propagated_attn):
+    # t = min(t_max, int(reduce(mul, shrink_factors, 1)))
+    for p_attn in reversed(comb_attn):
         attn_plots.append(
             plot_attention_interpreter(
-                x[0][:t],
+                x[0][:t_max],
                 p_attn,
                 res=res[0],
                 patch_size=patch_size,
