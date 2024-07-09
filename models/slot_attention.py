@@ -17,6 +17,7 @@ class SA(pl.LightningModule):
         implicit=False,
         ff_swiglu=False,
         sampler="gaussian",
+        vis_post_weight_attn=False,
         eps=1e-8,
     ):
         super().__init__()
@@ -24,6 +25,7 @@ class SA(pl.LightningModule):
         self.slot_dim = slot_dim
         self.n_iters = n_iters
         self.implicit = implicit
+        self.vis_post_weight_attn = vis_post_weight_attn
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -60,11 +62,17 @@ class SA(pl.LightningModule):
         if mask is not None:
             # NOTE: Masking attention is sensitive to the chosen value
             dots.masked_fill_(~mask[:, None, :], -torch.finfo(k.dtype).max)
-        attn = dots.softmax(dim=1) + self.eps
+        attn = dots.softmax(dim=1)
+        attn_vis = attn.clone()
+
+        attn = attn + self.eps
         attn = attn / attn.sum(dim=-1, keepdim=True)
+        if self.vis_post_weight_attn:
+            attn_vis = attn
+
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
-        return updates, attn
+        return updates, attn_vis
 
     def sample(self, x, n_slots, sample=None):
         if sample is not None:
@@ -84,7 +92,7 @@ class SA(pl.LightningModule):
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
 
-        # NOTE: GRUCell does not support bf16
+        # NOTE: GRUCell does not support bf16 before PyTorch 2.3
         if k.device.type == "cuda":
             with torch.autocast(device_type=k.device.type, dtype=torch.float32):
                 slots = self.gru(updates, slots)
