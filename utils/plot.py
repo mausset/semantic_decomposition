@@ -36,21 +36,26 @@ def plot_attention_interpreter(
     colors = torch.tensor(palette[:, :3], dtype=torch.float16).to(img.device)
     colors = repeat(colors, "n c -> 1 n c 1 1")
 
-    cat_imgs = []
+    # cat_imgs = []
     attn_map = rearrange(attn_maps, "b (h w) n -> b n h w", h=res // patch_size)
     attn_map = F.interpolate(attn_map, scale_factor=patch_size, mode="bilinear")
     max_idx = attn_map.argmax(dim=1)
 
-    attn_mask = F.one_hot(max_idx, num_classes=n).float().permute(0, 3, 1, 2)
+    segment_list = []
+    for i in range(b):
+        attn_mask = (
+            F.one_hot(max_idx[i, None], num_classes=n).float().permute(0, 3, 1, 2)
+        )
+        attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
+        segment = (colors * attn_mask).sum(dim=1)
+        segment_list.append(segment)
 
-    attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
-    segment = (colors * attn_mask).sum(dim=1)
-    # segmented_img = img * alpha
-    # for color_index in range(n):
-    #     color_mask = colors[:, color_index, :, :, :]
-    #     attn_mask_single = attn_mask[:, color_index, :, :, :]
-    #     segment = (color_mask * attn_mask_single).sum(dim=1, keepdim=True)
-    #     segmented_img += segment * (1 - alpha)
+    segment = torch.cat(segment_list, dim=0)
+
+    # attn_mask = F.one_hot(max_idx, num_classes=n).float().permute(0, 3, 1, 2)
+    # attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
+    # segment = (colors * attn_mask).sum(dim=1)
+
     segmented_img = img * alpha + segment * (1 - alpha)
 
     return segmented_img
