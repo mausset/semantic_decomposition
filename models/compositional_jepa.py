@@ -183,8 +183,6 @@ class CompositionalJEPA(pl.LightningModule):
         self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
 
-        self.time_pe = PositionalEncoding1D(dim)
-
         base_res = (resolution[0] // self.patch_size, resolution[1] // self.patch_size)
         self.layers = nn.ModuleList(
             [
@@ -295,25 +293,25 @@ class CompositionalJEPA(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v.item(), sync_dist=True)
 
-        attn_plots = plot_attention_interpreter_hierarchical(
-            x=x,
-            attn_maps=attn_maps,
-            shrink_factors=self.shrink_factors,
-            t_max=self.current_config["t_max"],
-            res=self.resolution,
-            patch_size=self.patch_size,
-        )
-        if (
-            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
-            and self.trainer.global_rank == 0
-        ):
-            log_dict = {}
-            for idx, attn in enumerate(attn_plots):
-                log_dict[f"attention_{idx}"] = wandb.Video(
-                    attn.cpu().numpy() * 255, fps=6, format="gif"
-                )
-
-            self.logger.experiment.log(log_dict)  # type: ignore
+        # attn_plots = plot_attention_interpreter_hierarchical(
+        #     x=x,
+        #     attn_maps=attn_maps,
+        #     shrink_factors=self.shrink_factors,
+        #     t_max=self.current_config["t_max"],
+        #     res=self.resolution,
+        #     patch_size=self.patch_size,
+        # )
+        # if (
+        #     isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
+        #     and self.trainer.global_rank == 0
+        # ):
+        #     log_dict = {}
+        #     for idx, attn in enumerate(attn_plots):
+        #         log_dict[f"attention_{idx}"] = wandb.Video(
+        #             attn.cpu().numpy() * 255, fps=6, format="gif"
+        #         )
+        #
+        #     self.logger.experiment.log(log_dict)  # type: ignore
 
         loss = torch.stack(list(losses.values())).sum()
 
