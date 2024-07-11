@@ -47,7 +47,7 @@ class CJEPALayer(nn.Module):
         self.dim = dim
         self.decode_res = decode_res
         self.n_slots = n_slots
-        self.max_seq_len = max_seq_len + 1
+        self.max_seq_len = max_seq_len
         self.recurrent_sa = recurrent_sa
 
     @property
@@ -58,13 +58,14 @@ class CJEPALayer(nn.Module):
         pe = self.time_pe(torch.zeros((b, t, d), device=self.device))
         return repeat(pe, "b t d -> b t n d", n=n)
 
-    def shrink_time(self, x, add_pe=True):
+    def shrink_time(self, x, add_pe=False):
         if self.shrink_factor == 1:
             return x
 
         b, t, *_ = x.shape
-        slack = t % self.shrink_factor
-        x = x[:, : t - slack]
+        if t > self.shrink_factor:
+            slack = t % self.shrink_factor
+            x = x[:, : t - slack]
         x = rearrange(x, "b (t sf) ... -> (b t) sf ...", sf=self.shrink_factor)
         if add_pe:
             x = x + self._time_pe(*x.shape)
@@ -75,7 +76,7 @@ class CJEPALayer(nn.Module):
     def forward(self, x):
         b, t, *_ = x.shape
 
-        x = self.shrink_time(x)
+        x = self.shrink_time(x, add_pe=True)
         if self.encoder:
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.encoder(x)
@@ -106,7 +107,13 @@ class CJEPALayer(nn.Module):
 
     def predict_decode(self, slots):
 
-        slots = slots[:, : min(self.max_seq_len, slots.shape[1]) - 1]
+        slots = slots[:, :-1]
+        max_seq_len = min(self.max_seq_len, slots.shape[1])
+        if slots.shape[1] > self.max_seq_len:
+            slack = slots.shape[1] % self.max_seq_len
+            slots = slots[:, : slots.shape[1] - slack]
+
+        slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=max_seq_len)
 
         b, t, *_ = slots.shape
 
@@ -118,16 +125,20 @@ class CJEPALayer(nn.Module):
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
 
         pred_dec = self.decoder(predictions, resolution=self.decode_res)
-        pred_dec = rearrange(pred_dec, "(b t) n d -> b t n d", b=b)
         pred_dec = rearrange(
-            pred_dec, "b t (sf n) ... -> b (t sf) n ...", sf=self.shrink_factor
+            pred_dec, "(b t) (sf n) d -> b (t sf) n d", b=b, sf=self.shrink_factor
         )
 
         return pred_dec
 
     def make_target(self, x):
-        x = self.shrink_time(x, add_pe=False)
-        x = x[:, 1 : min(self.max_seq_len, x.shape[1])]
+        x = self.shrink_time(x)
+        x = x[:, 1:]
+        max_seq_len = min(self.max_seq_len, x.shape[1])
+        if x.shape[1] > self.max_seq_len:
+            slack = x.shape[1] % self.max_seq_len
+            x = x[:, : x.shape[1] - slack]
+        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=max_seq_len)
         x = rearrange(x, "b t (sf n) ... -> b (t sf) n ...", sf=self.shrink_factor)
 
         return x
@@ -184,8 +195,10 @@ class CompositionalJEPA(pl.LightningModule):
         self.patch_size = self.image_encoder.patch_embed.patch_size[0]
 
         base_res = (resolution[0] // self.patch_size, resolution[1] // self.patch_size)
-        self.layers = nn.ModuleList(
-            [
+        self.layers = nn.ModuleList([])
+        for i in range(len(shrink_factors)):
+            decode_res = (shrink_factors[i], n_slots[i - 1]) if i > 0 else base_res
+            self.layers.append(
                 CJEPALayer(
                     encoder_args=encoder_args if i > 0 else None,
                     slot_attention_args=slot_attention_args,
@@ -193,14 +206,12 @@ class CompositionalJEPA(pl.LightningModule):
                     decoder_args=decoder_args,
                     shrink_factor=shrink_factors[i],
                     dim=dim,
-                    decode_res=(shrink_factors[i], n_slots[i]) if i > 0 else base_res,
+                    decode_res=decode_res,
                     n_slots=n_slots[i],
                     max_seq_len=max_seq_lens[i],
                     recurrent_sa=recurrent_sa,
                 )
-                for i in range(len(shrink_factors))
-            ]
-        )
+            )
 
         self.loss_fn = SamplesLoss(**loss_args)
 
@@ -308,7 +319,7 @@ class CompositionalJEPA(pl.LightningModule):
             log_dict = {}
             for idx, attn in enumerate(attn_plots):
                 log_dict[f"attention_{idx}"] = wandb.Video(
-                    attn.cpu().numpy() * 255, fps=6, format="gif"
+                    attn.cpu().numpy() * 255, fps=3, format="gif"
                 )
 
             self.logger.experiment.log(log_dict)  # type: ignore

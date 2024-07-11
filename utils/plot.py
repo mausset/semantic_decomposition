@@ -69,6 +69,7 @@ def plot_attention_interpreter_hierarchical(
     res,
     patch_size,
 ):
+    # This function is a mess, needs refactoring
 
     total_shrink = int(reduce(mul, shrink_factors, 1))
     multiples = t_max // total_shrink
@@ -102,11 +103,10 @@ def plot_attention_interpreter_hierarchical(
     comb_attn = list(zip(*comb_attn))
     comb_attn = [torch.cat(attn, dim=0) for attn in comb_attn]
     attn_plots = []
-    # t = min(t_max, int(reduce(mul, shrink_factors, 1)))
     for p_attn in reversed(comb_attn):
         attn_plots.append(
             plot_attention_interpreter(
-                x[0][:t_max],
+                x[0][: p_attn.shape[0]],
                 p_attn,
                 res=res[0],
                 patch_size=patch_size,
