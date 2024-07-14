@@ -54,11 +54,19 @@ class TransformerDecoderV1(pl.LightningModule):
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, decoder_args) -> None:
+    def __init__(self, dim=384, dim_context=384, depth=4) -> None:
         super().__init__()
 
-        self.pe = PE2D(decoder_args["dim"])
-        self.transformer = Encoder(**decoder_args)
+        self.pe = PE2D(dim)
+        self.transformer = Encoder(
+            dim=dim,
+            dim_context=dim_context,
+            depth=depth,
+            ff_glu=True,
+            ff_swish=True,
+            attn_flash=True,
+            cross_attend=True,
+        )
 
     def forward(self, x, resolution, mask=None, context_mask=None):
         """
@@ -69,10 +77,6 @@ class TransformerDecoder(nn.Module):
         """
 
         target = self.pe(x, resolution)
-
-        # target = torch.randn(
-        #     x.shape[0], resolution[0] * resolution[1], x.shape[-1], device=x.device
-        # )
 
         result = self.transformer(
             target,

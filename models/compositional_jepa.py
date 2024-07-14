@@ -19,36 +19,65 @@ from utils.plot import plot_attention_interpreter_hierarchical
 from x_transformers import Encoder
 
 
-class CJEPALayer(nn.Module):
+class CJEPABlock(nn.Module):
 
     def __init__(
         self,
-        encoder_args: dict | None,
-        slot_attention_args: dict,
-        predictor_args: dict,
-        decoder_args: dict,
-        shrink_factor: int,
-        dim: int,
-        decode_res: tuple[int, int],
-        n_slots: int,
-        max_seq_len: int = 32,
-        recurrent_sa: bool = False,
+        config: dict,
+        prev_n_slots: int | tuple[int, int],
     ):
         super().__init__()
+        self.dim = config["dim"]
+        self.slot_dim = config["slot_dim"]
+        self.n_slots = config["n_slots"]
+        self.shrink_factor = config["shrink_factor"]
+        self.context_len = config["context_len"]
+        if isinstance(prev_n_slots, tuple):
+            self.decode_res = prev_n_slots
+        else:
+            # self.decode_res = (config["shrink_factor"], prev_n_slots)
+            self.decode_res = next(
+                (i, prev_n_slots // i)
+                for i in range(int(prev_n_slots**0.5), 0, -1)
+                if prev_n_slots % i == 0
+            )
 
-        self.time_pe = PositionalEncoding1D(dim)
+        print(f"Decode res: {self.decode_res}")
 
-        self.encoder = Encoder(**encoder_args) if encoder_args else None
-        self.slot_attention = SA(**slot_attention_args, n_slots=n_slots)
-        self.predictor = Encoder(**predictor_args)
-        self.decoder = TransformerDecoder(decoder_args)
+        self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.shrink_factor = shrink_factor
-        self.dim = dim
-        self.decode_res = decode_res
-        self.n_slots = n_slots
-        self.max_seq_len = max_seq_len
-        self.recurrent_sa = recurrent_sa
+        self.encoder = (
+            Encoder(
+                dim=self.dim,
+                depth=config["enc_depth"],
+                ff_glu=True,
+                ff_swish=True,
+                attn_flash=True,
+            )
+            if "enc_depth" in config
+            else None
+        )
+        self.slot_attention = SA(
+            input_dim=self.dim,
+            slot_dim=self.slot_dim,
+            n_slots=self.n_slots,
+            n_iters=8,
+        )
+        self.predictor = Encoder(
+            dim=self.slot_dim,
+            depth=config["pred_depth"],
+            ff_glu=True,
+            ff_swish=True,
+            attn_flash=True,
+        )
+        self.decoder = TransformerDecoder(
+            dim=self.dim, dim_context=self.slot_dim, depth=config["dec_depth"]
+        )
+
+        if config["loss"] == "mse":
+            self.loss_fn = nn.MSELoss()
+        elif config["loss"] == "sinkhorn":
+            self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
     @property
     def device(self):
@@ -66,6 +95,7 @@ class CJEPALayer(nn.Module):
         if t > self.shrink_factor:
             slack = t % self.shrink_factor
             x = x[:, : t - slack]
+
         x = rearrange(x, "b (t sf) ... -> (b t) sf ...", sf=self.shrink_factor)
         if add_pe:
             x = x + self._time_pe(*x.shape)
@@ -83,41 +113,25 @@ class CJEPALayer(nn.Module):
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
         b, t, *_ = x.shape
-        if not self.recurrent_sa:
-            x = rearrange(x, "b t ... -> (b t) ...")
-            slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
-            slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
-        else:
-            slots = None
-            samples = []
-            attn_maps = []
-            for i in range(t):
-                x_i = x[:, i]
-                slots, attn_map = self.slot_attention(
-                    x_i, n_slots=self.n_slots, sample=slots
-                )
-                samples.append(slots)
-                attn_maps.append(attn_map)
-
-            slots = torch.stack(samples, dim=1)
-            attn_map = torch.stack(attn_maps, dim=1)
-            attn_map = rearrange(attn_map, "b t ... -> (b t) ...")
+        x = rearrange(x, "b t ... -> (b t) ...")
+        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
+        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
 
         return slots, attn_map
 
     def predict_decode(self, slots):
 
         slots = slots[:, :-1]
-        max_seq_len = min(self.max_seq_len, slots.shape[1])
-        if slots.shape[1] > self.max_seq_len:
-            slack = slots.shape[1] % self.max_seq_len
+        context_len = min(self.context_len, slots.shape[1])
+        if slots.shape[1] > self.context_len:
+            slack = slots.shape[1] % self.context_len
             slots = slots[:, : slots.shape[1] - slack]
 
-        slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=max_seq_len)
+        slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=context_len)
 
         b, t, *_ = slots.shape
 
-        slots_te = slots + self._time_pe(b, t, self.n_slots, self.dim)
+        slots_te = slots + self._time_pe(b, t, self.n_slots, self.slot_dim)
         slots_te = rearrange(slots_te, "b t n d -> b (t n) d")
 
         mask = block_causal_mask(t, self.n_slots, device=self.device)
@@ -134,14 +148,25 @@ class CJEPALayer(nn.Module):
     def make_target(self, x):
         x = self.shrink_time(x)
         x = x[:, 1:]
-        max_seq_len = min(self.max_seq_len, x.shape[1])
-        if x.shape[1] > self.max_seq_len:
-            slack = x.shape[1] % self.max_seq_len
+        context_len = min(self.context_len, x.shape[1])
+        if x.shape[1] > self.context_len:
+            slack = x.shape[1] % self.context_len
             x = x[:, : x.shape[1] - slack]
-        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=max_seq_len)
+        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=context_len)
         x = rearrange(x, "b t (sf n) ... -> b (t sf) n ...", sf=self.shrink_factor)
 
         return x
+
+    def calc_loss(self, x, slots):
+        pred_dec = self.predict_decode(slots)
+        target = self.make_target(x)
+
+        assert pred_dec.shape == target.shape
+
+        pred_dec = rearrange(pred_dec, "b t n d -> (b t) n d")
+        target = rearrange(target, "b t n d -> (b t) n d")
+
+        return self.loss_fn(pred_dec, target.detach()).mean()
 
 
 class CompositionalJEPA(pl.LightningModule):
@@ -149,31 +174,18 @@ class CompositionalJEPA(pl.LightningModule):
     def __init__(
         self,
         image_encoder_name,
-        encoder_args: dict,
-        slot_attention_args: dict,
-        predictor_args: dict,
-        decoder_args: dict,
-        loss_args: dict,
-        shrink_factors: list[int],
-        dim: int,
+        block_configs: list[dict],
         resolution: tuple[int, int],
         schedule: list = [],
-        n_slots: list[int] = [16, 8],
-        max_seq_lens: list[int] = [32, 32],
-        optimizer: str = "adamw",
-        optimizer_args: dict = {},
+        optimizer_config: dict = {},
         lr_warmup_steps: int = 0,
-        recurrent_sa: bool = False,
     ):
         super().__init__()
 
-        self.dim = dim
-        self.n_slots = n_slots
-        self.shrink_factors = shrink_factors
         self.resolution = resolution
+        self.shrink_factors = [config["shrink_factor"] for config in block_configs]
 
-        self.optimizer = optimizer
-        self.optimizer_args = optimizer_args
+        self.optimizer_config = optimizer_config
         self.lr_warmup_steps = lr_warmup_steps
 
         self.schedule = schedule
@@ -196,24 +208,15 @@ class CompositionalJEPA(pl.LightningModule):
 
         base_res = (resolution[0] // self.patch_size, resolution[1] // self.patch_size)
         self.layers = nn.ModuleList([])
-        for i in range(len(shrink_factors)):
-            decode_res = (shrink_factors[i], n_slots[i - 1]) if i > 0 else base_res
+        for i in range(len(block_configs)):
             self.layers.append(
-                CJEPALayer(
-                    encoder_args=encoder_args if i > 0 else None,
-                    slot_attention_args=slot_attention_args,
-                    predictor_args=predictor_args,
-                    decoder_args=decoder_args,
-                    shrink_factor=shrink_factors[i],
-                    dim=dim,
-                    decode_res=decode_res,
-                    n_slots=n_slots[i],
-                    max_seq_len=max_seq_lens[i],
-                    recurrent_sa=recurrent_sa,
+                CJEPABlock(
+                    block_configs[i],
+                    prev_n_slots=(
+                        block_configs[i - 1]["n_slots"] if i > 0 else base_res
+                    ),
                 )
             )
-
-        self.loss_fn = SamplesLoss(**loss_args)
 
         self.metric_loggers = nn.ModuleList([])
         for _ in range(len(self.layers)):
@@ -241,7 +244,8 @@ class CompositionalJEPA(pl.LightningModule):
     def forward_hierarchy(self, x, stage="train"):
         b, *_ = x.shape
 
-        x = x[:, : self.current_config["t_max"]]
+        if "t_max" in self.current_config:
+            x = x[:, : self.current_config["t_max"]]
         x = rearrange(x, "b t ... -> (b t) ...")
         x = self.forward_features(x)
         x = rearrange(x, "(b t) ... -> b t ...", b=b)
@@ -256,11 +260,7 @@ class CompositionalJEPA(pl.LightningModule):
             attn_maps.append(attn_map)
 
             if self.current_config["train"][idx]:
-                pred_dec = layer.predict_decode(slots)
-                target = layer.make_target(x)
-                pred_dec = rearrange(pred_dec, "b t n d -> (b t) n d")
-                target = rearrange(target, "b t n d -> (b t) n d")
-                loss = self.loss_fn(pred_dec, target.detach()).mean()
+                loss = layer.calc_loss(x, slots)
                 losses[idx] = loss
 
             x = slots.detach()
@@ -328,21 +328,24 @@ class CompositionalJEPA(pl.LightningModule):
 
         return loss
 
-    def optimizer_step(self, *args, **kwargs):
-        super().optimizer_step(*args, **kwargs)
+    def dynamic_warmup(self, step):
+        lr_factor = min(
+            (step - self.current_config["start_step"]) / self.lr_warmup_steps, 1.0
+        )
+        return lr_factor
 
     def configure_optimizers(self):  # type: ignore
-        optimzer = AdamW(self.parameters(), **self.optimizer_args)
+        optimizer = AdamW(self.parameters(), **self.optimizer_config)
         if self.lr_warmup_steps == 0:
-            return optimzer
+            return optimizer
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimzer,
-            lambda step: min(step / self.lr_warmup_steps, 1.0),
+            optimizer,
+            lambda step: self.dynamic_warmup(step),
         )
 
         config = {
-            "optimizer": optimzer,
+            "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
                 "interval": "step",
