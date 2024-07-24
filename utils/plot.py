@@ -51,11 +51,6 @@ def plot_attention_interpreter(
         segment_list.append(segment)
 
     segment = torch.cat(segment_list, dim=0)
-
-    # attn_mask = F.one_hot(max_idx, num_classes=n).float().permute(0, 3, 1, 2)
-    # attn_mask = repeat(attn_mask, "b n h w -> b n 1 h w")
-    # segment = (colors * attn_mask).sum(dim=1)
-
     segmented_img = img * alpha + segment * (1 - alpha)
 
     return segmented_img

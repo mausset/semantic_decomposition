@@ -12,7 +12,14 @@ initial_prefetch_size = 16
 
 
 @pipeline_def  # type: ignore
-def video_pipe(filenames, resolution=(224, 224), sequence_length=16, stride=6, step=1):
+def video_pipe(
+    filenames,
+    resolution=(224, 224),
+    sequence_length=16,
+    stride=6,
+    step=1,
+    shuffle=True,
+):
     videos = fn.readers.video_resize(
         device="gpu",
         filenames=filenames,
@@ -22,7 +29,7 @@ def video_pipe(filenames, resolution=(224, 224), sequence_length=16, stride=6, s
         stride=stride,
         step=step,
         num_shards=1,
-        random_shuffle=True,
+        random_shuffle=shuffle,
         name="Reader",
         initial_fill=initial_prefetch_size,
         prefetch_queue_depth=1,
@@ -45,6 +52,15 @@ def video_pipe(filenames, resolution=(224, 224), sequence_length=16, stride=6, s
     return videos
 
 
+class WTWrapper(DALIGenericIterator):
+    def __init__(self, *kargs, **kvargs):
+        super().__init__(*kargs, **kvargs)
+
+    def __next__(self):  # type: ignore
+        out = super().__next__()
+        return out[0]["data"]
+
+
 class WalkingTours(pl.LightningDataModule):
 
     def __init__(self, pipeline_config: dict):
@@ -56,19 +72,8 @@ class WalkingTours(pl.LightningDataModule):
     def setup(self, stage=None):  # type: ignore
         print("Setting up WalkingTours dataset...")
 
-        class LightningWrapper(DALIGenericIterator):
-            def __init__(self, *kargs, **kvargs):
-                super().__init__(*kargs, **kvargs)
-
-            def __next__(self):  # type: ignore
-                out = super().__next__()
-                # DDP is used so only one pipeline per process
-                # also we need to transform dict returned by
-                # DALIClassificationIterator to iterable and squeeze the lables
-                return out[0]["data"]
-
         wt_pipeline_train = video_pipe(**self.pipeline_config)
-        self.train_loader = LightningWrapper(
+        self.train_loader = WTWrapper(
             wt_pipeline_train,
             reader_name="Reader",
             output_map=["data"],
@@ -76,7 +81,7 @@ class WalkingTours(pl.LightningDataModule):
         )
 
         wt_pipeline_val = video_pipe(**self.pipeline_config)
-        self.val_loader = LightningWrapper(
+        self.val_loader = WTWrapper(
             wt_pipeline_val,
             reader_name="Reader",
             output_map=["data"],

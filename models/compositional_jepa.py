@@ -5,8 +5,6 @@ import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 
-from torchmetrics.aggregation import MeanMetric
-
 # from matplotlib import pyplot as plt
 from models.decoder import TransformerDecoder
 from models.slot_attention import SA
@@ -14,9 +12,12 @@ from positional_encodings.torch_encodings import PositionalEncoding1D
 from timm.layers.config import set_fused_attn
 from torch import nn
 from torch.optim import AdamW
+from torchmetrics.aggregation import MeanMetric
 from utils.helpers import block_causal_mask
-from utils.plot import plot_attention_interpreter_hierarchical
-from x_transformers import Encoder
+from utils.plot import plot_attention_interpreter_hierarchical, denormalize_imagenet
+from x_transformers import Encoder, ViTransformerWrapper
+
+from copy import deepcopy
 
 
 class CJEPABlock(nn.Module):
@@ -24,7 +25,7 @@ class CJEPABlock(nn.Module):
     def __init__(
         self,
         config: dict,
-        prev_n_slots: int | tuple[int, int],
+        prev_n_slots: int,
     ):
         super().__init__()
         self.dim = config["dim"]
@@ -32,31 +33,35 @@ class CJEPABlock(nn.Module):
         self.n_slots = config["n_slots"]
         self.shrink_factor = config["shrink_factor"]
         self.context_len = config["context_len"]
-        if isinstance(prev_n_slots, tuple):
-            self.decode_res = prev_n_slots
-        else:
-            # self.decode_res = (config["shrink_factor"], prev_n_slots)
-            self.decode_res = next(
-                (i, prev_n_slots // i)
-                for i in range(int(prev_n_slots**0.5), 0, -1)
-                if prev_n_slots % i == 0
-            )
+        self.resolution = config.get("resolution", None)
+        self.patch_size = config.get("patch_size", None)
+
+        self.decode_res = next(
+            (i, prev_n_slots // i)
+            for i in range(int(prev_n_slots**0.5), 0, -1)
+            if prev_n_slots % i == 0
+        )
 
         print(f"Decode res: {self.decode_res}")
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.encoder = (
-            Encoder(
-                dim=self.dim,
-                depth=config["enc_depth"],
-                ff_glu=True,
-                ff_swish=True,
-                attn_flash=True,
-            )
-            if "enc_depth" in config
-            else None
+        self.encoder = Encoder(
+            dim=self.dim,
+            depth=config["enc_depth"],
+            ff_glu=True,
+            ff_swish=True,
+            attn_flash=True,
         )
+
+        if self.resolution is not None:
+            self.encoder = ViTransformerWrapper(
+                image_size=self.resolution[0],
+                patch_size=self.patch_size,
+                attn_layers=self.encoder,
+                num_register_tokens=4,
+            )
+
         self.slot_attention = SA(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
@@ -71,13 +76,19 @@ class CJEPABlock(nn.Module):
             attn_flash=True,
         )
         self.decoder = TransformerDecoder(
-            dim=self.dim, dim_context=self.slot_dim, depth=config["dec_depth"]
+            dim=self.dim,
+            dim_context=self.slot_dim,
+            depth=config["dec_depth"],
+            resolution=self.decode_res,
+            patch_size=self.patch_size,
         )
 
         if config["loss"] == "mse":
             self.loss_fn = nn.MSELoss()
         elif config["loss"] == "sinkhorn":
             self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
+        else:
+            raise ValueError("Invalid loss function.")
 
     @property
     def device(self):
@@ -104,23 +115,23 @@ class CJEPABlock(nn.Module):
         return x
 
     def forward(self, x):
-        b, t, *_ = x.shape
+        b, *_ = x.shape
 
         x = self.shrink_time(x, add_pe=True)
         if self.encoder:
             x = rearrange(x, "b t ... -> (b t) ...")
-            x = self.encoder(x)
+            x = self.encoder(x, return_embeddings=True)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
-        b, t, *_ = x.shape
+        if self.slot_attention is None:
+            return x, None
         x = rearrange(x, "b t ... -> (b t) ...")
         slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
-        slots = rearrange(slots, "(b t) n d -> b t n d", t=t)
+        slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
         return slots, attn_map
 
     def predict_decode(self, slots):
-
         slots = slots[:, :-1]
         context_len = min(self.context_len, slots.shape[1])
         if slots.shape[1] > self.context_len:
@@ -129,18 +140,25 @@ class CJEPABlock(nn.Module):
 
         slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=context_len)
 
-        b, t, *_ = slots.shape
+        b, t, n, *_ = slots.shape
 
-        slots_te = slots + self._time_pe(b, t, self.n_slots, self.slot_dim)
-        slots_te = rearrange(slots_te, "b t n d -> b (t n) d")
+        slots = slots + self._time_pe(b, t, n, self.slot_dim)
+        slots = rearrange(slots, "b t n d -> b (t n) d")
 
-        mask = block_causal_mask(t, self.n_slots, device=self.device)
-        predictions = self.predictor(slots_te, attn_mask=mask)
+        mask = block_causal_mask(t, n, device=self.device)
+        predictions = self.predictor(slots, attn_mask=mask)
         predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
 
-        pred_dec = self.decoder(predictions, resolution=self.decode_res)
+        pred_dec = self.decoder(predictions)
+        if self.patch_size is not None:
+            pred_dec = rearrange(pred_dec, "(b t) ... -> b t ...", b=b)
+            return pred_dec
+
         pred_dec = rearrange(
-            pred_dec, "(b t) (sf n) d -> b (t sf) n d", b=b, sf=self.shrink_factor
+            pred_dec,
+            "(b t) (sf n) d -> b (t sf) n d",
+            b=b,
+            sf=self.shrink_factor,
         )
 
         return pred_dec
@@ -148,6 +166,10 @@ class CJEPABlock(nn.Module):
     def make_target(self, x):
         x = self.shrink_time(x)
         x = x[:, 1:]
+
+        if self.patch_size is not None:
+            return x
+
         context_len = min(self.context_len, x.shape[1])
         if x.shape[1] > self.context_len:
             slack = x.shape[1] % self.context_len
@@ -163,17 +185,23 @@ class CJEPABlock(nn.Module):
 
         assert pred_dec.shape == target.shape
 
-        pred_dec = rearrange(pred_dec, "b t n d -> (b t) n d")
-        target = rearrange(target, "b t n d -> (b t) n d")
+        pred_dec = rearrange(pred_dec, "b t ... -> (b t) ...")
+        target = rearrange(target, "b t ... -> (b t) ...")
 
-        return self.loss_fn(pred_dec, target.detach()).mean()
+        ret = {}
+        ret["loss"] = self.loss_fn(pred_dec, target.detach()).mean()
+
+        if self.patch_size is not None:
+            ret["decoded"] = pred_dec.detach()
+
+        return ret
 
 
 class CompositionalJEPA(pl.LightningModule):
 
     def __init__(
         self,
-        image_encoder_name,
+        image_encoder_name: str | None,
         block_configs: list[dict],
         resolution: tuple[int, int],
         schedule: list = [],
@@ -191,40 +219,50 @@ class CompositionalJEPA(pl.LightningModule):
         self.schedule = schedule
         self.current_config = schedule[0]
 
-        set_fused_attn(True)
-        self.image_encoder = (
-            timm.create_model(
-                image_encoder_name,
-                pretrained=True,
-                img_size=resolution,
-                num_classes=0,
+        assert (
+            image_encoder_name or "resolution" in block_configs[0]
+        ), "Either image encoder or base layer must be present."
+
+        if image_encoder_name:
+            set_fused_attn(True)
+            self.image_encoder = (
+                timm.create_model(
+                    image_encoder_name,
+                    pretrained=True,
+                    img_size=resolution,
+                    num_classes=0,
+                )
+                .eval()
+                .requires_grad_(False)
             )
-            .eval()
-            .requires_grad_(False)
+
+            self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
+            self.patch_size = self.image_encoder.patch_embed.patch_size[0]
+        else:
+            self.discard_tokens = 0
+            self.patch_size = block_configs[0]["patch_size"]
+
+        base_n_slots = (
+            resolution[0] // self.patch_size * resolution[1] // self.patch_size
         )
-
-        self.discard_tokens = 1 + (4 if "reg4" in image_encoder_name else 0)
-        self.patch_size = self.image_encoder.patch_embed.patch_size[0]
-
-        base_res = (resolution[0] // self.patch_size, resolution[1] // self.patch_size)
-        self.layers = nn.ModuleList([])
+        self.blocks = nn.ModuleList([])
         for i in range(len(block_configs)):
-            self.layers.append(
+            self.blocks.append(
                 CJEPABlock(
                     block_configs[i],
                     prev_n_slots=(
-                        block_configs[i - 1]["n_slots"] if i > 0 else base_res
+                        block_configs[i - 1]["n_slots"] if i > 0 else base_n_slots
                     ),
                 )
             )
 
         self.metric_loggers = nn.ModuleList([])
-        for _ in range(len(self.layers)):
+        for _ in range(len(self.blocks)):
             self.metric_loggers.append(
                 nn.ModuleDict(
                     {
-                        "mean_norm": MeanMetric(),
-                        "mean_var": MeanMetric(),
+                        "slot_norm": MeanMetric(),
+                        "slot_var": MeanMetric(),
                         "loss": MeanMetric(),
                     }
                 )
@@ -238,38 +276,42 @@ class CompositionalJEPA(pl.LightningModule):
             if step > config["start_step"]:
                 self.current_config = config
 
-        for train_config, layer in zip(self.current_config["train"], self.layers):
-            layer.requires_grad_(train_config)
+        for train_config, block in zip(self.current_config["train"], self.blocks):
+            block.requires_grad_(train_config)
 
     def forward_hierarchy(self, x, stage="train"):
         b, *_ = x.shape
 
         if "t_max" in self.current_config:
             x = x[:, : self.current_config["t_max"]]
-        x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.forward_features(x)
-        x = rearrange(x, "(b t) ... -> b t ...", b=b)
+
+        if hasattr(self, "image_encoder"):
+            x = rearrange(x, "b t ... -> (b t) ...")
+            x = self.forward_features(x)
+            x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
         attn_maps = []
         losses = {}
-        for idx, layer in enumerate(self.layers):
+        decoded = None
+        for idx, block in enumerate(self.blocks):
             if self.current_config["skip"][idx]:
                 break
 
-            slots, attn_map = layer(x)
+            slots, attn_map = block(x)
             attn_maps.append(attn_map)
 
             if self.current_config["train"][idx]:
-                loss = layer.calc_loss(x, slots)
-                losses[idx] = loss
+                res = block.calc_loss(x, slots)
+                losses[idx] = res["loss"]
+                decoded = res.get("decoded", None)
 
             x = slots.detach()
 
             flat = rearrange(x, "b t n d -> (b t n) d")
-            self.metric_loggers[idx]["mean_norm"](torch.norm(flat, dim=1).mean())  # type: ignore
-            self.metric_loggers[idx]["mean_var"](torch.var(flat, dim=0).mean())  # type: ignore
+            self.metric_loggers[idx]["slot_norm"](torch.norm(flat.detach(), dim=1).mean())  # type: ignore
+            self.metric_loggers[idx]["slot_var"](torch.var(flat.detach(), dim=0).mean())  # type: ignore
 
-        return losses, attn_maps
+        return losses, attn_maps, decoded
 
     def log_metrics(self, batch_idx, stage="train"):
         if stage == "train" and batch_idx % self.trainer.accumulate_grad_batches != 0:
@@ -286,7 +328,7 @@ class CompositionalJEPA(pl.LightningModule):
     def training_step(self, x, batch_idx: int):
         self.update_config(self.global_step)
 
-        losses, _ = self.forward_hierarchy(x)
+        losses, *_ = self.forward_hierarchy(x)
 
         for k, v in losses.items():
             self.metric_loggers[k]["loss"](v)  # type: ignore
@@ -299,7 +341,7 @@ class CompositionalJEPA(pl.LightningModule):
 
     def validation_step(self, x):
 
-        losses, attn_maps = self.forward_hierarchy(x, stage="val")
+        losses, attn_maps, decoded = self.forward_hierarchy(x, stage="val")
 
         for k, v in losses.items():
             self.log(f"val/loss_{k}", v.item(), sync_dist=True)
@@ -312,6 +354,12 @@ class CompositionalJEPA(pl.LightningModule):
             res=self.resolution,
             patch_size=self.patch_size,
         )
+
+        if decoded is not None:
+            decoded = denormalize_imagenet(
+                decoded[torch.randperm(decoded.shape[0])[0]].cpu()
+            )
+
         if (
             isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
             and self.trainer.global_rank == 0
@@ -319,8 +367,11 @@ class CompositionalJEPA(pl.LightningModule):
             log_dict = {}
             for idx, attn in enumerate(attn_plots):
                 log_dict[f"attention_{idx}"] = wandb.Video(
-                    attn.cpu().numpy() * 255, fps=3, format="gif"
+                    attn.cpu().numpy() * 255, fps=10, format="gif"
                 )
+
+            if decoded is not None:
+                log_dict["decoded"] = wandb.Image(decoded)
 
             self.logger.experiment.log(log_dict)  # type: ignore
 

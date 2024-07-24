@@ -29,7 +29,7 @@ class MySaveConfigCallback(SaveConfigCallback):
 
 
 def main():
-    torch.set_printoptions(precision=4, linewidth=200, sci_mode=False)
+    torch.set_printoptions(precision=4, linewidth=200, sci_mode=True)
 
     LightningCLI(
         parser_kwargs={"parser_mode": "omegaconf"},

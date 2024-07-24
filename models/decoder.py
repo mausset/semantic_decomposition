@@ -1,63 +1,27 @@
-import lightning as pl
 import torch
 from torch import nn
-from torch.nn import functional as F
-from models.positional_encoding import FourierScaffold
 from x_transformers import Encoder
 from models.components import PE2D
-
-
-class TransformerDecoderV1(pl.LightningModule):
-
-    def __init__(self, dim, depth, pos_enc=None) -> None:
-        super().__init__()
-
-        self.dim = dim
-        self.depth = depth
-
-        if pos_enc is None:
-            pos_enc = FourierScaffold(in_dim=2, out_dim=dim)
-        self.pos_enc = pos_enc
-
-        self.transformer = Encoder(
-            dim=dim,
-            depth=depth,
-            cross_attend=True,
-            ff_glu=True,
-            ff_swish=True,
-        )
-
-    def forward(self, x, resolution, sample=None, mask=None, context_mask=None):
-        """
-        args:
-            x: (B, N, D), extracted object representations
-        returns:
-            (B, HW, D), decoded features
-            (B, HW, N), cross-attention map
-        """
-
-        target = self.pos_enc(x, resolution, sample=sample)
-
-        result, hiddens = self.transformer(
-            target,
-            mask=mask,
-            context=x,
-            context_mask=context_mask,
-            return_hiddens=True,
-        )
-
-        # Last cross-attention map, mean across heads
-        attn_map = hiddens.attn_intermediates[-1].post_softmax_attn.mean(dim=1)
-
-        return result, attn_map
+from einops import rearrange, repeat
 
 
 class TransformerDecoder(nn.Module):
 
-    def __init__(self, dim=384, dim_context=384, depth=4) -> None:
+    def __init__(
+        self,
+        dim=384,
+        dim_context=384,
+        depth=4,
+        resolution=(32, 32),
+        patch_size=None,
+    ):
         super().__init__()
 
-        self.pe = PE2D(dim)
+        # self.pe = PE2D(dim)
+        num_patches = resolution[0] * resolution[1]
+        self.resolution = resolution
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+
         self.transformer = Encoder(
             dim=dim,
             dim_context=dim_context,
@@ -67,8 +31,12 @@ class TransformerDecoder(nn.Module):
             attn_flash=True,
             cross_attend=True,
         )
+        self.patch_size = patch_size
 
-    def forward(self, x, resolution, mask=None, context_mask=None):
+        if patch_size is not None:
+            self.ff = nn.Linear(dim, patch_size * patch_size * 3)
+
+    def forward(self, x, mask=None, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -76,7 +44,8 @@ class TransformerDecoder(nn.Module):
             (B, HW, D), decoded features
         """
 
-        target = self.pe(x, resolution)
+        # target = self.pe(x, resolution)
+        target = repeat(self.pos_embedding, "1 n d -> (b 1) n d", b=x.shape[0])
 
         result = self.transformer(
             target,
@@ -84,5 +53,17 @@ class TransformerDecoder(nn.Module):
             context=x,
             context_mask=context_mask,
         )
+
+        if self.patch_size is not None:
+            result = self.ff(result)
+            result = rearrange(
+                result,
+                "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
+                h=self.resolution[0],
+                w=self.resolution[1],
+                p1=self.patch_size,
+                p2=self.patch_size,
+                c=3,
+            )
 
         return result
