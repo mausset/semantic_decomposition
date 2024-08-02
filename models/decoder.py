@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from x_transformers import Encoder
-from models.components import PE2D
+from models.positional_encoding import get_2d_sincos_pos_embed
 from einops import rearrange, repeat
 
 
@@ -14,6 +14,7 @@ class TransformerDecoder(nn.Module):
         depth=4,
         resolution=(32, 32),
         patch_size=None,
+        sincos=False,
     ):
         super().__init__()
 
@@ -21,6 +22,11 @@ class TransformerDecoder(nn.Module):
         num_patches = resolution[0] * resolution[1]
         self.resolution = resolution
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+
+        if sincos:
+            pos_embedding = get_2d_sincos_pos_embed(dim, (resolution[0]))
+            self.pos_embedding.data.copy_(torch.from_numpy(pos_embedding))
+            self.pos_embedding.requires_grad_(False)
 
         self.transformer = Encoder(
             dim=dim,

@@ -8,7 +8,7 @@ import nvidia.dali.fn as fn
 import nvidia.dali.types as types
 
 
-initial_prefetch_size = 16
+initial_prefetch_size = 8
 
 
 @pipeline_def  # type: ignore

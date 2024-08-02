@@ -56,6 +56,14 @@ class SA(pl.LightningModule):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
+    def sample(self, x, n_slots, sample=None):
+        if sample is not None:
+            return sample
+
+        if isinstance(self.sampler, nn.Parameter):
+            return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
+        return self.sampler(x, n_slots)  # type: ignore
+
     def inv_cross_attn(self, q, k, v, mask=None):
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
@@ -74,20 +82,12 @@ class SA(pl.LightningModule):
 
         return updates, attn_vis
 
-    def sample(self, x, n_slots, sample=None):
-        if sample is not None:
-            return sample
-
-        if isinstance(self.sampler, nn.Parameter):
-            return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
-        return self.sampler(x, n_slots)  # type: ignore
-
-    def step(self, slots, k, v, return_attn=False):
+    def step(self, slots, k, v, return_attn=False, mask=None):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
-        updates, attn = self.inv_cross_attn(q, k, v)
+        updates, attn = self.inv_cross_attn(q, k, v, mask=mask)
 
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
@@ -108,23 +108,23 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, n_slots=8, sample=None):
+    def forward(self, x, n_slots=8, mask=None):
 
         x = self.norm_input(x)
 
-        init_slots = self.sample(x, n_slots, sample=sample)
+        init_slots = self.sample(x, n_slots)
         slots = init_slots.clone()
 
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots = self.step(slots, k, v)
+            slots = self.step(slots, k, v, mask=mask)
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
 
-        slots, attn_map = self.step(slots, k, v, return_attn=True)
+        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
