@@ -1,3 +1,4 @@
+import io
 import numpy as np
 import seaborn as sns
 import torch
@@ -11,6 +12,10 @@ from functools import reduce
 from operator import mul
 
 from sklearn.decomposition import PCA
+
+import math
+
+from PIL import Image
 
 
 def denormalize_imagenet(img):
@@ -233,36 +238,45 @@ def visualize_features(feature_map, patch_size, original_image):
     plt.show()
 
 
-def visualize_top_components(feature_map, patch_size, original_image, n_components=5):
+def visualize_top_components(feature_map, patch_size, original_image, n_components=8):
     """
-    Visualize the top n principal components of patches from a self-supervised model.
+    Visualize the top n principal components of patches from a self-supervised model in a square grid.
 
     Args:
-    feature_map (torch.Tensor): The feature map from the model of shape [N, D] where
+    feature_map (torch.Tensor): The feature map from the model of shape [B, N, D] where
                                 N is the number of patches and D is the dimensionality of features.
     patch_size (int): The size of each patch (assuming square patches).
     original_image (torch.Tensor): The original image tensor.
     n_components (int): Number of top principal components to visualize.
     """
+
+    _, n, _ = feature_map.shape
+
     # Calculate the number of patches along width and height assuming square patches
     img_height, img_width = original_image.shape[1], original_image.shape[2]
     num_patches_side = img_height // patch_size
 
     # Perform PCA on the feature map to reduce to the top n components
     pca = PCA(n_components=n_components)
-    feature_map_np = feature_map.detach().cpu().numpy()  # Convert to numpy for PCA
-    principal_components = pca.fit_transform(
-        feature_map_np
-    )  # This is the correct transformed data
+    feature_map_np = rearrange(feature_map, "b n d -> (b n) d").detach().cpu().numpy()
+    principal_components = pca.fit_transform(feature_map_np)[:n]  # Projected data
+
+    # Determine the grid size
+    total_plots = n_components + 1  # Additional one for the original image
+    grid_size = math.ceil(math.sqrt(total_plots))
 
     # Plotting
-    fig, axes = plt.subplots(1, n_components + 1, figsize=(n_components * 3, 3))
+    fig, axes = plt.subplots(
+        grid_size, grid_size, figsize=(grid_size * 3, grid_size * 3)
+    )
+    axes = axes.flatten()  # Flatten the 2D array of axes to simplify indexing
 
-    # Display original image
+    # Display original image in the first plot
     axes[0].imshow(original_image.permute(1, 2, 0).cpu().numpy().astype("uint8"))
     axes[0].set_title("Original Image")
     axes[0].axis("off")
 
+    # Display principal components in subsequent plots
     for i in range(n_components):
         component = torch.tensor(principal_components[:, i]).float()
         component_image = rearrange(
@@ -282,5 +296,80 @@ def visualize_top_components(feature_map, patch_size, original_image, n_componen
         axes[i + 1].set_title(f"Component {i + 1}")
         axes[i + 1].axis("off")
 
+    # Hide any unused axes
+    for ax in axes[n_components + 1 :]:
+        ax.axis("off")
+
     plt.tight_layout()
+    # plt.show()
+
+    # Return plot as an image
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+    buf.seek(0)
+    img = Image.open(buf)
+    return img
+
+
+def visualize_pca_rgb(feature_map, patch_size, original_image):
+    _, n, _ = feature_map.shape
+    """
+    Visualize the top three principal components of patches from a self-supervised model, using them
+    as RGB channels next to the original image.
+
+    Args:
+    feature_map (torch.Tensor): The feature map from the model of shape [B, N, D] where
+                                N is the number of patches and D is the dimensionality of features.
+    patch_size (int): The size of each patch (assuming square patches).
+    original_image (torch.Tensor): The original image tensor.
+    """
+    # Calculate the number of patches along width and height assuming square patches
+    img_height, img_width = original_image.shape[1], original_image.shape[2]
+    num_patches_side = img_height // patch_size
+
+    # Perform PCA on the feature map to reduce to the top 3 components
+    pca = PCA(n_components=3)
+    feature_map_np = rearrange(feature_map, "b n d -> (b n) d").detach().cpu().numpy()
+    principal_components = pca.fit_transform(feature_map_np)[:n]  # Projected data
+
+    # Create RGB image from the first three principal components
+    rgb_image = torch.zeros((3, num_patches_side, num_patches_side))
+
+    for i in range(3):
+        component = torch.tensor(principal_components[:, i]).float()
+        component_image = rearrange(
+            component, "(h w) -> h w", h=num_patches_side, w=num_patches_side
+        )
+
+        # Scale to [0, 1] for visualization
+        component_image -= component_image.min()
+        component_image /= component_image.max()
+
+        rgb_image[i] = component_image
+
+    # Resize RGB components to the original image dimensions
+    rgb_image = (
+        torch.nn.functional.interpolate(
+            rgb_image.unsqueeze(0), size=(img_height, img_width), mode="nearest"
+        )
+        .squeeze(0)
+        .permute(1, 2, 0)
+    )
+
+    # Ensure the RGB image has proper color scaling
+    rgb_image = (rgb_image - rgb_image.min()) / (rgb_image.max() - rgb_image.min())
+
+    # Plotting
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.title("Original Image")
+    plt.imshow(original_image.permute(1, 2, 0).cpu().numpy().astype("uint8"))
+    plt.axis("off")
+
+    plt.subplot(1, 2, 2)
+    plt.title("PCA RGB Visualization")
+    plt.imshow(rgb_image.numpy())
+    plt.axis("off")
+
     plt.show()

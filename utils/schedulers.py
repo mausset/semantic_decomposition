@@ -15,7 +15,6 @@ class WarmupCosineSchedule(LRScheduler):
         ref_lr,
         T_max,
         last_epoch=-1,
-        verbose=False,
         final_lr=0.0,
     ):
         self.optimizer = optimizer
@@ -27,10 +26,9 @@ class WarmupCosineSchedule(LRScheduler):
         self._step_count = 0.0
         self.last_epoch = -1
 
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
     def get_lr(self):  # type: ignore
-        self._step_count += 1
         if self._step_count < self.warmup_steps:
             progress = float(self._step_count) / float(max(1, self.warmup_steps))
             new_lr = self.start_lr + progress * (self.ref_lr - self.start_lr)

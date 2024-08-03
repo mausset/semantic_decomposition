@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import lightning as pl
 import torch
+import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 from models.encoder import Predictor, ViTransformer
@@ -9,10 +10,9 @@ from torch import nn
 from torch.optim import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.helpers import apply_mask
-from utils.plot import visualize_top_components, denormalize_imagenet
-from x_transformers import Encoder
-
+from utils.plot import denormalize_imagenet, visualize_pca_rgb, visualize_top_components
 from utils.schedulers import WarmupCosineSchedule
+from x_transformers import Encoder
 
 
 class JEPA(nn.Module):
@@ -42,7 +42,7 @@ class JEPA(nn.Module):
                 attn_flash=True,
             ),
             num_register_tokens=0,
-            sincos=True,
+            sincos=False,
         )
         self.teacher = deepcopy(self.encoder).eval().requires_grad_(False)
 
@@ -57,7 +57,7 @@ class JEPA(nn.Module):
                 attn_flash=True,
             ),
             resolution=self.feature_map_resolution,
-            sincos=True,
+            sincos=False,
         )
 
 
@@ -97,6 +97,8 @@ class JEPATrainer(pl.LightningModule):
             self.loss_fn = nn.MSELoss(reduce="none")
         elif config["loss"] == "sinkhorn":
             self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
+
+        self.image = None
 
     @property
     def device(self):
@@ -153,6 +155,11 @@ class JEPATrainer(pl.LightningModule):
                 rearrange(target, "b n d -> (b n) d").norm(dim=1).mean()
             )
 
+            if self.image is None and self.trainer.global_rank == 0:
+                self.image = visualize_top_components(
+                    target, self.patch_size, denormalize_imagenet(x[0]) * 255
+                )
+
             target = repeat(target, "b n d -> (b m) n d", m=self.n_target_blocks)
             masks = rearrange(target_mask, "b m n -> (b m) n")
             target = apply_mask(target, masks)
@@ -190,6 +197,11 @@ class JEPATrainer(pl.LightningModule):
         self.log_metrics(batch_idx)
 
         return loss
+
+    def on_train_epoch_end(self):
+        if self.image is not None and self.trainer.global_rank == 0:
+            self.logger.experiment.log({"target_components": wandb.Image(self.image)})  # type: ignore
+            self.image = None
 
     def validation_step(self, x):
 
