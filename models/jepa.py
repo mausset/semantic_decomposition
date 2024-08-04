@@ -39,7 +39,7 @@ class JEPA(nn.Module):
                 attn_flash=True,
             ),
             num_register_tokens=config.get("n_registers", 0),
-            sincos=False,
+            sincos=True,
         )
         self.teacher = deepcopy(self.encoder).eval().requires_grad_(False)
 
@@ -53,7 +53,7 @@ class JEPA(nn.Module):
                 attn_flash=True,
             ),
             resolution=self.feature_map_resolution,
-            sincos=False,
+            sincos=True,
         )
 
 
