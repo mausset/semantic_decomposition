@@ -5,6 +5,17 @@ import math
 from torch.optim.lr_scheduler import LRScheduler
 
 
+class LinearSchedule(object):
+
+    def __init__(self, start, end, duration):
+        self.start = start
+        self.end = end
+        self.duration = duration
+
+    def __call__(self, t):
+        return min(self.start + (self.end - self.start) * t / self.duration, self.end)
+
+
 class WarmupCosineSchedule(LRScheduler):
 
     def __init__(

@@ -10,8 +10,8 @@ from torch import nn
 from torch.optim import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.helpers import apply_mask
-from utils.plot import denormalize_imagenet, visualize_pca_rgb, visualize_top_components
-from utils.schedulers import WarmupCosineSchedule
+from utils.plot import denormalize_imagenet, visualize_top_components
+from utils.schedulers import WarmupCosineSchedule, LinearSchedule
 from x_transformers import Encoder
 
 
@@ -21,8 +21,6 @@ class JEPA(nn.Module):
         super().__init__()
 
         self.dim = config["dim"]
-        self.scale = config["scale"]
-        self.alpha = config["alpha"]
         self.patch_size = config["patch_size"]
         self.resolution = config["resolution"]
         self.feature_map_resolution = (
@@ -38,10 +36,9 @@ class JEPA(nn.Module):
                 depth=config["enc_depth"],
                 heads=config["enc_heads"],
                 ff_glu=True,
-                ff_swish=True,
                 attn_flash=True,
             ),
-            num_register_tokens=0,
+            num_register_tokens=config.get("n_registers", 0),
             sincos=False,
         )
         self.teacher = deepcopy(self.encoder).eval().requires_grad_(False)
@@ -53,7 +50,6 @@ class JEPA(nn.Module):
                 depth=config["pred_depth"],
                 heads=config["pred_heads"],
                 ff_glu=True,
-                ff_swish=True,
                 attn_flash=True,
             ),
             resolution=self.feature_map_resolution,
@@ -70,9 +66,9 @@ class JEPATrainer(pl.LightningModule):
     ):
         super().__init__()
 
+        self.config = config
         self.n_target_blocks = config["n_target_blocks"]
         self.scale = config["scale"]
-        self.alpha = config["alpha"]
         self.patch_size = config["patch_size"]
         self.resolution = config["resolution"]
         self.feature_map_resolution = (
@@ -155,9 +151,12 @@ class JEPATrainer(pl.LightningModule):
                 rearrange(target, "b n d -> (b n) d").norm(dim=1).mean()
             )
 
-            if self.image is None and self.trainer.global_rank == 0:
+            if self.image is None and self.trainer.is_global_zero:
                 self.image = visualize_top_components(
-                    target, self.patch_size, denormalize_imagenet(x[0]) * 255
+                    target,
+                    self.patch_size,
+                    denormalize_imagenet(x[0]) * 255,
+                    n_components=63,
                 )
 
             target = repeat(target, "b n d -> (b m) n d", m=self.n_target_blocks)
@@ -167,13 +166,9 @@ class JEPATrainer(pl.LightningModule):
         x = self.jepa.encoder(x, mask=context_mask)
         predicted = self.jepa.predictor(x, target_mask)
 
-        loss_pred = self.loss_fn(predicted, target.detach()).mean()
+        loss = self.loss_fn(predicted, target.detach()).mean()
 
-        losses = {
-            "loss": loss_pred,
-        }
-
-        return losses
+        return loss
 
     def log_metrics(self, batch_idx, stage="train"):
         if batch_idx % self.trainer.accumulate_grad_batches != 0:
@@ -188,44 +183,47 @@ class JEPATrainer(pl.LightningModule):
 
     def training_step(self, x, batch_idx: int):
 
-        losses = self.forward(x)
-        for k, v in losses.items():
-            self.metric_loggers[k](v)
-
-        loss = losses["loss"]
+        loss = self.forward(x)
+        self.metric_loggers["loss"](loss)
 
         self.log_metrics(batch_idx)
 
         return loss
 
     def on_train_epoch_end(self):
-        if self.image is not None and self.trainer.global_rank == 0:
+        if self.image is not None and self.trainer.is_global_zero:
             self.logger.experiment.log({"target_components": wandb.Image(self.image)})  # type: ignore
             self.image = None
 
     def validation_step(self, x):
 
-        losses = self.forward(x, stage="val")
+        loss = self.forward(x, stage="val")
 
-        loss = losses["loss"]
-
-        for k, v in losses.items():
-            self.log(f"val/{k}", v, prog_bar=True, sync_dist=True)
+        self.log("val/loss", loss, prog_bar=True, sync_dist=True)
 
         return loss
 
     def update_target(self):
+        alpha = self.alpha(self.global_step)
         for p, target_p in zip(
             self.jepa.encoder.parameters(), self.jepa.teacher.parameters()  # type: ignore
         ):
-            target_p.data.mul_(self.alpha).add_(p.data.detach(), alpha=1 - self.alpha)
+            target_p.data.mul_(alpha).add_(p.data.detach(), alpha=1 - alpha)
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
         self.update_target()
 
     def configure_optimizers(self):  # type: ignore
-        optimizer = AdamW(self.parameters())
+        self.alpha = LinearSchedule(
+            self.config["alpha"][0],
+            self.config["alpha"][1],
+            self.trainer.estimated_stepping_batches,
+        )
+
+        optimizer = AdamW(
+            self.parameters(), weight_decay=self.optimizer_config["weight_decay"]
+        )
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
 

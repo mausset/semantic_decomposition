@@ -6,35 +6,38 @@ model:
     config:
       dim: 196
       slot_dim: ${.dim}
-      alpha: 0.996
+      alpha: 
+        - 0.996
+        - 1.0
       n_target_blocks: 4
+      n_registers: 4
       scale: [0.1, 0.3]
       resolution: [224, 224]
-      patch_size: 8
+      patch_size: 14
       enc_depth: 4
       enc_heads: 2
       pred_depth: 4
       pred_heads: 2
-      loss: sinkhorn
+      loss: mse
     optimizer_config:
       start_lr: 2e-4
       ref_lr: 1e-3
       final_lr: 2e-6
-      warmup_epochs: 10
-      T_max: 100
+      warmup_epochs: 15
+      weight_decay: 0.05
       
 data:
   class_path: dataset.image_dataset.DALIImageDataset
   init_args:
-    root: "./data/walking_tours/test"
-    batch_size: 64
+    root: "./data/walking_tours/decoded"
+    batch_size: 320
     resolution: [224, 224]
     num_threads: 8
 
 trainer:
-  accumulate_grad_batches: 16
+  accumulate_grad_batches: 4
   precision: "bf16"
-  max_epochs: 100
+  max_epochs: 300
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
@@ -45,6 +48,8 @@ trainer:
       # id: xy7ta6ca 
   callbacks:
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        log_weight_decay: True
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         save_top_k: -1
