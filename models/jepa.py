@@ -38,11 +38,10 @@ class JEPA(nn.Module):
                 depth=config["enc_depth"],
                 heads=config["enc_heads"],
                 ff_glu=True,
-                ff_swish=True,
                 attn_flash=True,
             ),
             num_register_tokens=0,
-            sincos=False,
+            sincos=True,
         )
         self.teacher = deepcopy(self.encoder).eval().requires_grad_(False)
 
@@ -53,11 +52,10 @@ class JEPA(nn.Module):
                 depth=config["pred_depth"],
                 heads=config["pred_heads"],
                 ff_glu=True,
-                ff_swish=True,
                 attn_flash=True,
             ),
             resolution=self.feature_map_resolution,
-            sincos=False,
+            sincos=True,
         )
 
 
