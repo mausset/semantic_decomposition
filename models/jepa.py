@@ -155,7 +155,10 @@ class JEPATrainer(pl.LightningModule):
 
             if self.image is None and self.trainer.global_rank == 0:
                 self.image = visualize_top_components(
-                    target, self.patch_size, denormalize_imagenet(x[0]) * 255
+                    target,
+                    self.patch_size,
+                    denormalize_imagenet(x[0]) * 255,
+                    n_components=63,
                 )
 
             target = repeat(target, "b n d -> (b m) n d", m=self.n_target_blocks)
