@@ -75,14 +75,17 @@ class ViTransformer(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, dim, attn_layers, resolution, sincos=False):
+    def __init__(self, dim, pred_dim, attn_layers, resolution, sincos=False):
         super().__init__()
+
+        self.embed = nn.Linear(dim, pred_dim)
+        self.unembed = nn.Linear(pred_dim, dim)
 
         num_patches = resolution[0] * resolution[1]
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, pred_dim))
         if sincos:
-            pos_embedding = get_2d_sincos_pos_embed(dim, resolution[0])
+            pos_embedding = get_2d_sincos_pos_embed(pred_dim, resolution[0])
             self.pos_embedding.data.copy_(torch.from_numpy(pos_embedding))
             self.pos_embedding.requires_grad_(False)
 
@@ -93,6 +96,8 @@ class Predictor(nn.Module):
         _, n_ctx, _ = x.shape
         _, m, *_ = target_mask.shape
 
+        x = self.embed(x)
+
         target = repeat(self.pos_embedding, "1 n d -> (b m 1) n d", b=x.shape[0], m=m)
 
         target_mask = rearrange(target_mask, "b m ... -> (b m) ...")
@@ -102,5 +107,6 @@ class Predictor(nn.Module):
 
         target = self.transformer(target)
         target = target[:, n_ctx:]
+        target = self.unembed(target)
 
         return target

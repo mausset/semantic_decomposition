@@ -21,6 +21,7 @@ class JEPA(nn.Module):
         super().__init__()
 
         self.dim = config["dim"]
+        self.pred_dim = config["pred_dim"]
         self.patch_size = config["patch_size"]
         self.resolution = config["resolution"]
         self.feature_map_resolution = (
@@ -45,6 +46,7 @@ class JEPA(nn.Module):
 
         self.predictor = Predictor(
             dim=self.dim,
+            pred_dim=self.pred_dim,
             attn_layers=Encoder(
                 dim=self.dim,
                 depth=config["pred_depth"],
