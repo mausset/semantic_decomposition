@@ -9,12 +9,14 @@ INITIAL_FILL = 8
 
 
 @pipeline_def
-def ssl_image_pipeline(root, resolution):
+def ssl_image_pipeline(root, resolution, shard_id=0, num_shards=1):
     images, _ = fn.readers.file(
         file_root=root,
         random_shuffle=True,
         initial_fill=INITIAL_FILL,
         name="Reader",
+        shard_id=shard_id,
+        num_shards=num_shards,
     )
     images = fn.decoders.image(
         images,
@@ -53,12 +55,18 @@ class DALIImageDataset(pl.LightningDataModule):
                 out = super().__next__()
                 return out[0]["data"]
 
+        device_id = self.local_rank
+        shard_id = self.global_rank
+        num_shards = self.trainer.world_size
+
         pipeline = ssl_image_pipeline(
             root=self.root,
             resolution=self.resolution,
             batch_size=self.batch_size,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
             num_threads=self.num_threads,
-            device_id=0,
         )
 
         self.train_loader = LightningWrapper(
