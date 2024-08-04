@@ -55,8 +55,8 @@ class DALIImageDataset(pl.LightningDataModule):
                 out = super().__next__()
                 return out[0]["data"]
 
-        device_id = self.local_rank
-        shard_id = self.global_rank
+        device_id = self.trainer.local_rank
+        shard_id = self.trainer.global_rank
         num_shards = self.trainer.world_size
 
         pipeline = ssl_image_pipeline(
