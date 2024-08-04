@@ -153,9 +153,9 @@ class JEPATrainer(pl.LightningModule):
 
             if self.image is None and self.trainer.is_global_zero:
                 self.image = visualize_top_components(
-                    target,
+                    target[0].detach(),
                     self.patch_size,
-                    denormalize_imagenet(x[0]) * 255,
+                    denormalize_imagenet(x[0].detach()) * 255,
                     n_components=63,
                 )
 

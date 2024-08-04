@@ -250,16 +250,14 @@ def visualize_top_components(feature_map, patch_size, original_image, n_componen
     n_components (int): Number of top principal components to visualize.
     """
 
-    _, n, _ = feature_map.shape
-
     # Calculate the number of patches along width and height assuming square patches
     img_height, img_width = original_image.shape[1], original_image.shape[2]
     num_patches_side = img_height // patch_size
 
     # Perform PCA on the feature map to reduce to the top n components
     pca = PCA(n_components=n_components)
-    feature_map_np = rearrange(feature_map, "b n d -> (b n) d").detach().cpu().numpy()
-    principal_components = pca.fit_transform(feature_map_np)[:n]  # Projected data
+    feature_map_np = feature_map.detach().cpu().numpy()
+    principal_components = pca.fit_transform(feature_map_np)  # Projected data
 
     # Determine the grid size
     total_plots = n_components + 1  # Additional one for the original image
