@@ -5,8 +5,8 @@ import torch
 from einops import pack, rearrange, repeat, unpack
 from models.positional_encoding import get_2d_sincos_pos_embed
 from torch import nn
+import torch.nn.functional as F
 from utils.helpers import apply_mask
-from x_transformers import Encoder
 
 
 class ViTransformer(nn.Module):
@@ -68,6 +68,8 @@ class ViTransformer(nn.Module):
 
         if self.has_register_tokens:
             embed, _ = unpack(embed, ps, "b * d")  # type: ignore
+
+        embed = F.layer_norm(embed, (embed.size(-1),))
 
         return embed
 
