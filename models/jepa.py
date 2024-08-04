@@ -48,7 +48,7 @@ class JEPA(nn.Module):
             dim=self.dim,
             pred_dim=self.pred_dim,
             attn_layers=Encoder(
-                dim=self.dim,
+                dim=self.pred_dim,
                 depth=config["pred_depth"],
                 heads=config["pred_heads"],
                 ff_glu=True,
