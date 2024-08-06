@@ -13,27 +13,35 @@ initial_prefetch_size = 8
 
 @pipeline_def  # type: ignore
 def video_pipe(
-    filenames,
+    file_root="",
+    filenames=[],
     resolution=(224, 224),
     sequence_length=16,
     stride=6,
     step=1,
     shuffle=True,
+    shard_id=0,
+    num_shards=1,
 ):
+    print(f"file_root: {file_root}")
     videos = fn.readers.video_resize(
         device="gpu",
+        file_root=file_root,
         filenames=filenames,
         resize_shorter=resolution[0],
         sequence_length=sequence_length,
-        shard_id=0,
+        shard_id=shard_id,
         stride=stride,
         step=step,
-        num_shards=1,
+        num_shards=num_shards,
         random_shuffle=shuffle,
         name="Reader",
         initial_fill=initial_prefetch_size,
         prefetch_queue_depth=1,
+        file_list_include_preceding_frame=True,
     )
+    if isinstance(videos, list):
+        videos = videos[0]
 
     coin = fn.random.coin_flip(probability=0.5)
 
@@ -52,7 +60,7 @@ def video_pipe(
     return videos
 
 
-class WTWrapper(DALIGenericIterator):
+class LightningWrapper(DALIGenericIterator):
     def __init__(self, *kargs, **kvargs):
         super().__init__(*kargs, **kvargs)
 
@@ -67,33 +75,33 @@ class WalkingTours(pl.LightningDataModule):
         super().__init__()
 
         self.pipeline_config = pipeline_config
-        print(pipeline_config["filenames"])
 
     def setup(self, stage=None):  # type: ignore
         print("Setting up WalkingTours dataset...")
+        device_id = self.trainer.local_rank  # type: ignore
+        shard_id = self.trainer.global_rank  # type: ignore
+        num_shards = self.trainer.world_size  # type: ignore
 
-        wt_pipeline_train = video_pipe(**self.pipeline_config)
-        self.train_loader = WTWrapper(
+        wt_pipeline_train = video_pipe(
+            **self.pipeline_config,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+        )
+        self.train_loader = LightningWrapper(
             wt_pipeline_train,
             reader_name="Reader",
             output_map=["data"],
             last_batch_policy=LastBatchPolicy.DROP,
         )
 
-        wt_pipeline_val = video_pipe(**self.pipeline_config)
-        self.val_loader = WTWrapper(
-            wt_pipeline_val,
-            reader_name="Reader",
-            output_map=["data"],
-            last_batch_policy=LastBatchPolicy.DROP,
-        )
         print("WalkingTours dataset setup complete.")
 
     def train_dataloader(self):
         return self.train_loader
 
     def val_dataloader(self):
-        return self.val_loader
+        return None
 
     def test_dataloader(self):
         raise NotImplementedError

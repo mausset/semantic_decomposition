@@ -1,0 +1,73 @@
+seed_everything: 42
+
+model:
+  class_path: models.interpreter.InterpreterTrainer
+  init_args:
+    base_config:
+        model_name: 'vit_small_patch14_reg4_dinov2.lvd142m'
+        resolution: [448, 448]
+    # active_block: 0
+    block_configs:
+      - dim: 384
+        slot_dim: 768
+        n_slots: 64
+        context_len: 8
+        enc_depth: 4
+        pred_depth: 4
+        dec_depth: 4 
+      # - dim: 768
+      #   slot_dim: ${.dim}
+      #   n_slots: 32
+      #   context_len: 8
+      #   enc_depth: 4
+      #   pred_depth: 4
+      #   dec_depth: 4
+      # - dim: 768
+      #   slot_dim: ${.dim}
+      #   n_slots: 16
+      #   shrink_factor: 1
+      #   context_len: 8
+      #   enc_depth: 4
+      #   pred_depth: 4
+      #   dec_depth: 4
+    optimizer_config:
+      start_lr: 1e-4
+      ref_lr: 1e-3
+      final_lr: 2e-6
+      warmup_epochs: 5
+      weight_decay: 0.05
+    log_config:
+      n_frames: 8
+      fps: 10
+
+data:
+  class_path: dataset.walking_tours.WalkingTours
+  init_args:
+    pipeline_config:
+      file_root: "./data/walking_tours/medium_crop"
+      # filenames:
+      #   # - "./data/walking_tours/Venice/video.mp4"
+      #   - "./data/walking_tours/medium_crop/amsterdam.mp4"
+      #   - "./data/walking_tours/medium_crop/bangkok.mp4"
+      #   - "./data/walking_tours/medium_crop/istanbul.mp4" 
+      batch_size: 6
+      sequence_length: 9
+      stride: 3
+      step: -1
+      resolution: [448, 448]
+      num_threads: 8
+
+trainer:
+  accumulate_grad_batches: 4
+  precision: "bf16-mixed"
+  # logger:
+  #   class_path: lightning.pytorch.loggers.WandbLogger
+  #   init_args:
+  #     project: "comp_jepa"
+  #     log_model: False
+  #     save_dir: ./lightning_logs
+  callbacks:
+    class_path: lightning.pytorch.callbacks.LearningRateMonitor
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
+  log_every_n_steps: 25

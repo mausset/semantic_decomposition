@@ -61,6 +61,25 @@ def plot_attention_interpreter(
     return segmented_img
 
 
+def plot_attention_simple(
+    imgs,
+    attn_maps,
+    res,
+    patch_size,
+    n_frames,
+):
+    a = attn_maps[0][:n_frames]
+    for a_ in attn_maps[1:]:
+        a = torch.bmm(a, a_[:n_frames])
+
+    return plot_attention_interpreter(
+        imgs[0][:n_frames],
+        a,
+        res=res[0],
+        patch_size=patch_size,
+    )
+
+
 def plot_attention_interpreter_hierarchical(
     x,
     attn_maps,
@@ -159,83 +178,6 @@ def plot_attention(
         cat_img = torch.cat(cat_imgs[1:], dim=2)
 
     return cat_img
-
-
-def plot_attention_hierarchical(
-    img,
-    attn_maps,
-    res=224,
-    patch_size=14,
-    palette="muted",
-    alpha=0.4,
-):
-
-    collect = []
-
-    for attn_t in attn_maps:
-        collect.append(plot_attention(img, attn_t[0], res, patch_size, palette, alpha))
-
-    w = int(np.ceil(np.sqrt(len(collect))))
-    h = int(np.ceil(len(collect) / w))
-
-    extra = int(w * h - len(collect))
-
-    for _ in range(extra):
-        collect.append(torch.zeros_like(collect[0]))
-
-    rows = []
-    for i in range(h):
-        rows.append(torch.cat(collect[i * w : (i + 1) * w], dim=2))
-
-    return torch.cat(rows, dim=1)
-
-
-def visualize_features(feature_map, patch_size, original_image):
-    """
-    Visualize the first principal component magnitude of patches from a self-supervised model.
-
-    Args:
-    feature_map (torch.Tensor): The feature map from the model of shape [N, D] where
-                                N is the number of patches and D is the dimensionality of features.
-    patch_size (int): The size of each patch (assuming square patches).
-    original_image (torch.Tensor): The original image tensor.
-    """
-    # Calculate the number of patches along width and height assuming square patches
-    img_height, img_width = original_image.shape[1], original_image.shape[2]
-    num_patches_side = img_height // patch_size
-
-    # Perform PCA on the feature map to reduce to the top component
-    pca = PCA(n_components=25)
-    feature_map_np = feature_map.detach().cpu().numpy()  # Convert to numpy for PCA
-    principal_components = pca.fit_transform(feature_map_np)[:, 15, None]
-
-    # Map the principal component scores back to an image grid
-    component_image = torch.tensor(principal_components).float()
-    component_image = rearrange(
-        component_image, "(h w) 1 -> 1 h w", h=num_patches_side, w=num_patches_side
-    )
-
-    # Scale to [0, 1] for visualization
-    component_image -= component_image.min()
-    component_image /= component_image.max()
-
-    # Resize to the original image dimensions
-    component_image = torch.nn.functional.interpolate(
-        component_image.unsqueeze(0), size=(img_height, img_width), mode="nearest"
-    ).squeeze(0)
-
-    # Plotting
-    plt.figure(figsize=(10, 5))
-    plt.subplot(1, 2, 1)
-    plt.title("Original Image")
-    plt.imshow(original_image.permute(1, 2, 0).cpu().numpy().astype("uint8"))
-    plt.axis("off")
-
-    plt.subplot(1, 2, 2)
-    plt.title("Patch-wise First Principal Component")
-    plt.imshow(component_image.squeeze(), cmap="hot")
-    plt.axis("off")
-    plt.show()
 
 
 def visualize_top_components(feature_map, patch_size, original_image, n_components=8):

@@ -1,18 +1,51 @@
 import lightning as pl
+
+# from models.jepa import JEPA
+import timm
 import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder
-from models.jepa import JEPA
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.helpers import block_causal_mask
-from utils.plot import denormalize_imagenet, plot_attention_interpreter_hierarchical
+from utils.schedulers import WarmupCosineSchedule
+from utils.plot import (
+    plot_attention_interpreter_hierarchical,
+    plot_attention_simple,
+)
 from x_transformers import Encoder
+
+
+class TimmWrapper(nn.Module):
+
+    def __init__(
+        self,
+        model_name: str,
+        pretrained: bool = True,
+        num_classes: int = 0,
+        in_chans: int = 3,
+        resolution: int = 224,
+    ):
+        super().__init__()
+        self.model = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            num_classes=num_classes,
+            in_chans=in_chans,
+            img_size=resolution,
+        )
+
+        self.discard = 1 + 4 if "reg" in model_name else 1
+
+        self.patch_size = self.model.patch_embed.patch_size[0]
+
+    def forward(self, x):
+        return self.model.forward_features(x)[:, self.discard :]
 
 
 class InterpreterBlock(nn.Module):
@@ -20,19 +53,19 @@ class InterpreterBlock(nn.Module):
     def __init__(
         self,
         config: dict,
-        prev_n_slots: int,
+        n_decode: int,
     ):
         super().__init__()
         self.dim = config["dim"]
         self.slot_dim = config["slot_dim"]
         self.n_slots = config["n_slots"]
-        self.time_shrink = config["time_shrink"]
+        self.time_shrink = config.get("time_shrink", 1)
         self.context_len = config["context_len"]
 
         self.decode_res = next(
-            (i, prev_n_slots // i)
-            for i in range(int(prev_n_slots**0.5), 0, -1)
-            if prev_n_slots % i == 0
+            (i, n_decode // i)
+            for i in range(int(n_decode**0.5), 0, -1)
+            if n_decode % i == 0
         )
 
         print(f"Decode res: {self.decode_res}")
@@ -159,23 +192,31 @@ class Interpreter(nn.Module):
         self,
         base_config: dict,
         block_configs: list[dict],
+        active_block: int | None = None,
     ):
         super().__init__()
 
-        self.base = JEPA(base_config)
+        if active_block is not None:
+            block_configs = block_configs[: active_block + 1]
 
-        base_resolution = self.base.feature_map_resolution
-        n_slots = base_resolution[0] * base_resolution[1]
+        self.base = TimmWrapper(**base_config).eval().requires_grad_(False)
+
+        base_resolution = base_config["resolution"][0] // self.base.patch_size
+        n_decode = base_resolution**2
         self.blocks = nn.ModuleList([])
         for i in range(len(block_configs)):
-            self.blocks.append(InterpreterBlock(block_configs[i], prev_n_slots=n_slots))
-            n_slots = block_configs[i]["n_slots"]
+            self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
+            n_decode = block_configs[i]["n_slots"]
+
+        for block in self.blocks[:-1]:  # type: ignore
+            block.eval().requires_grad_(False)
 
     def forward(self, x):
 
+        b = x.shape[0]
         x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.base.teacher(x)
-        x = rearrange(x, "(b t) ... -> b t ...")
+        x = self.base(x)
+        x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
         attn_maps = []
         features = [x]
@@ -190,9 +231,10 @@ class Interpreter(nn.Module):
     def forward_train(self, x):
         attn_maps = []
         with torch.no_grad():
+            b = x.shape[0]
             x = rearrange(x, "b t ... -> (b t) ...")
-            x = self.base.teacher(x)
-            x = rearrange(x, "(b t) ... -> b t ...")
+            x = self.base(x)
+            x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
             for block in self.blocks[:-1]:  # type: ignore
                 x, attn_map = block(x)
@@ -213,17 +255,28 @@ class InterpreterTrainer(pl.LightningModule):
         self,
         base_config: dict,
         block_configs: list[dict],
+        active_block: int | None = None,
         optimizer_config: dict = {},
+        log_config: dict = {},
+        checkpoint_path: str | None = None,
     ):
         super().__init__()
 
+        self.interpreter = torch.compile(
+            Interpreter(base_config, block_configs, active_block)
+        )
+
+        if checkpoint_path is not None:
+            self.interpreter.load_state_dict(
+                torch.load(checkpoint_path)["state_dict"], strict=False
+            )
+
+        self.patch_size = self.interpreter.base.patch_size  # type: ignore
         self.resolution = base_config["resolution"]
-        self.patch_size = base_config["patch_size"]
-        self.shrink_factors = [config["shrink_factor"] for config in block_configs]
-
+        self.time_shrink = [block.time_shrink for block in self.interpreter.blocks]  # type: ignore
+        self.n_blocks = len(self.interpreter.blocks)  # type: ignore
         self.optimizer_config = optimizer_config
-
-        self.interpreter = Interpreter(base_config, block_configs)
+        self.log_config = log_config
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
@@ -235,9 +288,11 @@ class InterpreterTrainer(pl.LightningModule):
             }
         )
 
+        self.gif = None
+
     def forward(self, x, stage="train"):
 
-        pred, target, attn_maps = self.interpreter.forward_train(x)
+        pred, target, attn_maps = self.interpreter.forward_train(x)  # type: ignore
 
         pred = rearrange(pred, "b t ... -> (b t) ...")
         target = rearrange(target, "b t ... -> (b t) ...")
@@ -247,6 +302,7 @@ class InterpreterTrainer(pl.LightningModule):
         flat = rearrange(pred, "bt n d -> (bt n) d")
         self.metric_loggers["norm"](torch.norm(flat.detach(), dim=1).mean())  # type: ignore
         self.metric_loggers["var"](torch.var(flat.detach(), dim=0).mean())  # type: ignore
+        self.metric_loggers["loss"](loss.detach())  # type: ignore
 
         return loss, attn_maps
 
@@ -259,65 +315,69 @@ class InterpreterTrainer(pl.LightningModule):
             if torch.isnan(value):
                 continue
             self.log(
-                f"train/{k}_{len(self.blocks)}", value, prog_bar=True, sync_dist=True
+                f"train/{k}_{self.n_blocks-1}",
+                value,
+                prog_bar=True,
+                sync_dist=True,
             )
             v.reset()
 
+    def on_train_epoch_end(self):
+        if self.gif is not None and self.trainer.is_global_zero:
+            self.logger.experiment.log(self.gif)  # type: ignore
+            self.gif = None
+
     def training_step(self, x, batch_idx: int):
 
-        loss, *_ = self.forward_hierarchy(x)
+        loss, attn_maps = self.forward(x)
 
         self.log_metrics(batch_idx)
+
+        if (
+            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
+            and self.trainer.is_global_zero
+            and self.gif is None
+        ):
+            attn_plot = plot_attention_simple(
+                imgs=x.detach(),
+                attn_maps=[attn.detach() for attn in attn_maps],
+                res=self.resolution,
+                patch_size=self.patch_size,
+                n_frames=self.log_config["n_frames"],
+            )
+            log_dict = {
+                f"attention_{self.n_blocks-1}": wandb.Video(
+                    (attn_plot.cpu().numpy() * 255).astype("uint8"),
+                    fps=self.log_config["fps"],
+                    format="gif",
+                )
+            }
+
+            # self.logger.experiment.log(log_dict)  # type: ignore
+            self.gif = log_dict
 
         return loss
 
     def validation_step(self, x):
-
-        loss, attn_maps = self.forward_hierarchy(x, stage="val")
-
-        self.log(f"val/loss_{len(self.blocks)}", loss.item(), sync_dist=True)
-
-        attn_plots = plot_attention_interpreter_hierarchical(
-            x=x,
-            attn_maps=attn_maps,
-            shrink_factors=self.shrink_factors,
-            t_max=self.current_config["t_max"],
-            res=self.resolution,
-            patch_size=self.patch_size,
-        )
-
-        if (
-            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
-            and self.trainer.global_rank == 0
-        ):
-            log_dict = {}
-            for idx, attn in enumerate(attn_plots):
-                log_dict[f"attention_{idx}"] = wandb.Video(
-                    attn.cpu().numpy() * 255, fps=5, format="gif"
-                )
-
-            self.logger.experiment.log(log_dict)  # type: ignore
-
-        return loss
+        raise NotImplementedError
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        self.blocks[0].update_target()
-
-    def dynamic_warmup(self, step):
-        lr_factor = min(
-            (step - self.current_config["start_step"]) / self.lr_warmup_steps, 1.0
-        )
-        return lr_factor
 
     def configure_optimizers(self):  # type: ignore
-        optimizer = AdamW(self.parameters(), **self.optimizer_config)
-        if self.lr_warmup_steps == 0:
-            return optimizer
+        optimizer = AdamW(
+            self.parameters(), weight_decay=self.optimizer_config["weight_decay"]
+        )
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
+        steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
+
+        scheduler = WarmupCosineSchedule(
             optimizer,
-            lambda step: self.dynamic_warmup(step),
+            warmup_steps=self.optimizer_config["warmup_epochs"] * steps_per_epoch,
+            start_lr=self.optimizer_config["start_lr"],
+            ref_lr=self.optimizer_config["ref_lr"],
+            final_lr=self.optimizer_config["final_lr"],
+            T_max=self.trainer.max_epochs * steps_per_epoch,  # type: ignore
         )
 
         config = {
