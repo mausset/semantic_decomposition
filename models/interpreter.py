@@ -323,8 +323,7 @@ class InterpreterTrainer(pl.LightningModule):
             v.reset()
 
     def on_train_epoch_end(self):
-        if self.gif is not None and self.trainer.is_global_zero:
-            self.logger.experiment.log(self.gif)  # type: ignore
+        if self.gif is not None:
             self.gif = None
 
     def training_step(self, x, batch_idx: int):
@@ -352,6 +351,7 @@ class InterpreterTrainer(pl.LightningModule):
                     format="gif",
                 )
             }
+            self.logger.experiment.log(log_dict)  # type: ignore
 
             # self.logger.experiment.log(log_dict)  # type: ignore
             self.gif = log_dict
