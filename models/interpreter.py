@@ -267,7 +267,7 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         if checkpoint_path is not None:
-            self.interpreter.load_state_dict(
+            self.load_state_dict(
                 torch.load(checkpoint_path)["state_dict"], strict=False
             )
 

@@ -30,7 +30,7 @@ class MySaveConfigCallback(SaveConfigCallback):
 
 
 def main():
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     torch.set_printoptions(precision=4, linewidth=200, sci_mode=True)
 
     LightningCLI(
