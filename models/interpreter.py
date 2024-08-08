@@ -4,7 +4,7 @@ import lightning as pl
 import timm
 import torch
 import wandb
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder
 from models.slot_attention import SA
@@ -72,6 +72,8 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
+        self.register_tokens = nn.Parameter(torch.randn(self.n_slots, self.dim))
+        self.project = nn.Linear(self.dim, self.slot_dim, bias=False)
         self.encoder = Encoder(
             dim=self.dim,
             depth=config["enc_depth"],
@@ -132,13 +134,13 @@ class InterpreterBlock(nn.Module):
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
+        reg = repeat(self.register_tokens, "n d -> b n d", b=x.shape[0])
+        x, ps = pack((x, reg), "b * d")
         x = self.encoder(x)
-        x = rearrange(x, "(b t) ... -> b t ...", b=b)
+        x, reg = unpack(x, ps, "b * d")
 
-        if self.slot_attention is None:
-            return x, None
-        x = rearrange(x, "b t ... -> (b t) ...")
-        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
+        reg = self.project(reg)
+        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots, sample=reg)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
         return slots, attn_map

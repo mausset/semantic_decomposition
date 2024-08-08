@@ -108,12 +108,16 @@ class SA(pl.LightningModule):
 
         return slots
 
-    def forward(self, x, n_slots=8, mask=None):
+    def forward(self, x, n_slots=8, mask=None, sample=None):
 
         x = self.norm_input(x)
 
-        init_slots = self.sample(x, n_slots)
-        slots = init_slots.clone()
+        if sample is None:
+            init_slots = self.sample(x, n_slots)
+            slots = init_slots.clone()
+        else:
+            init_slots = sample
+            slots = sample.clone()
 
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
