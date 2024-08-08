@@ -72,13 +72,6 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.encoder = Encoder(
-            dim=self.dim,
-            depth=config["enc_depth"],
-            ff_glu=True,
-            ff_swish=True,
-            attn_flash=True,
-        )
         self.slot_attention = SA(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
@@ -132,12 +125,7 @@ class InterpreterBlock(nn.Module):
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.encoder(x)
-        x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
-        if self.slot_attention is None:
-            return x, None
-        x = rearrange(x, "b t ... -> (b t) ...")
         slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
