@@ -131,47 +131,52 @@ class InterpreterBlock(nn.Module):
 
         return slots, attn_map
 
-    def predict_decode(self, slots):
-        slots = slots[:, :-1]
-        context_len = min(self.context_len, slots.shape[1])
-        if slots.shape[1] > self.context_len:
-            slack = slots.shape[1] % self.context_len
-            slots = slots[:, : slots.shape[1] - slack]
+    def predict(self, x):
+        x = x[:, :-1]
+        context_len = min(self.context_len, x.shape[1])
+        if x.shape[1] > self.context_len:
+            slack = x.shape[1] % self.context_len
+            x = x[:, : x.shape[1] - slack]
 
-        slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=context_len)
+        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=context_len)
 
-        b, t, n, *_ = slots.shape
-
-        slots = slots + self._time_pe(b, t, n, self.slot_dim)
-        slots = rearrange(slots, "b t n d -> b (t n) d")
+        b, t, n, *_ = x.shape
+        x = x + self._time_pe(b, t, n, self.slot_dim)
+        x = rearrange(x, "b t n d -> b (t n) d")
 
         mask = block_causal_mask(t, n, device=self.device)
-        predictions = self.predictor(slots, attn_mask=mask)
-        predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
+        pred = self.predictor(x, attn_mask=mask)
+        pred = rearrange(pred, "b (t n) d -> b t n d", t=t)
 
-        pred_dec = self.decoder(predictions)
+        return pred
 
-        pred_dec = rearrange(
-            pred_dec,
+    def make_pred_target(self, x):
+        x = x[:, 1:]
+        context_len = min(self.context_len, x.shape[1])
+        if x.shape[1] > self.context_len:
+            slack = x.shape[1] % self.context_len
+            x = x[:, : x.shape[1] - slack]
+
+        return rearrange(x, "b (t s) n d -> (b t) s n d", s=context_len)
+
+    def decode(self, x):
+        b = x.shape[0]
+
+        x = rearrange(x, "b t n d -> (b t) n d")
+        dec = self.decoder(x)
+
+        dec = rearrange(
+            dec,
             "(b t) (sf n) d -> b (t sf) n d",
             b=b,
             sf=self.time_shrink,
         )
 
-        return pred_dec
+        return dec
 
-    def make_target(self, x):
+    def make_dec_target(self, x):
         x = self.shrink_time(x)
-        x = x[:, 1:]
-
-        context_len = min(self.context_len, x.shape[1])
-        if x.shape[1] > self.context_len:
-            slack = x.shape[1] % self.context_len
-            x = x[:, : x.shape[1] - slack]
-        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=context_len)
-        x = rearrange(x, "b t (sf n) ... -> b (t sf) n ...", sf=self.time_shrink)
-
-        return x
+        return rearrange(x, "b t (sf n) ... -> b (t sf) n ...", sf=self.time_shrink)
 
 
 class Interpreter(nn.Module):
@@ -228,13 +233,17 @@ class Interpreter(nn.Module):
                 x, attn_map = block(x)
                 attn_maps.append(attn_map)
 
-        target = self.blocks[-1].make_target(x)
+        dec_target = self.blocks[-1].make_dec_target(x)
 
         x, attn_map = self.blocks[-1](x)
         attn_maps.append(attn_map)
-        pred = self.blocks[-1].predict_decode(x)
 
-        return pred, target, attn_maps
+        pred_target = self.blocks[-1].make_pred_target(x)
+        pred = self.blocks[-1].predict(x)
+
+        dec = self.blocks[-1].decode(x)
+
+        return dec, dec_target, pred, pred_target, attn_maps
 
 
 class InterpreterTrainer(pl.LightningModule):
@@ -272,7 +281,8 @@ class InterpreterTrainer(pl.LightningModule):
             {
                 "norm": MeanMetric(),
                 "var": MeanMetric(),
-                "loss": MeanMetric(),
+                "loss_decode": MeanMetric(),
+                "loss_prediction": MeanMetric(),
             }
         )
 
@@ -280,17 +290,24 @@ class InterpreterTrainer(pl.LightningModule):
 
     def forward(self, x, stage="train"):
 
-        pred, target, attn_maps = self.interpreter.forward_train(x)  # type: ignore
+        dec, dec_target, pred, pred_target, attn_maps = self.interpreter.forward_train(x)  # type: ignore
+
+        dec = rearrange(dec, "b t ... -> (b t) ...")
+        dec_target = rearrange(dec_target, "b t ... -> (b t) ...")
 
         pred = rearrange(pred, "b t ... -> (b t) ...")
-        target = rearrange(target, "b t ... -> (b t) ...")
+        pred_target = rearrange(pred_target, "b t ... -> (b t) ...")
 
-        loss = self.loss_fn(pred, target.detach()).mean()
+        loss_decode = self.loss_fn(dec, dec_target).mean()
+        loss_pred = self.loss_fn(pred, pred_target).mean()
 
         flat = rearrange(pred, "bt n d -> (bt n) d")
         self.metric_loggers["norm"](torch.norm(flat.detach(), dim=1).mean())  # type: ignore
         self.metric_loggers["var"](torch.var(flat.detach(), dim=0).mean())  # type: ignore
-        self.metric_loggers["loss"](loss.detach())  # type: ignore
+        self.metric_loggers["loss_decode"](loss_decode.detach())  # type: ignore
+        self.metric_loggers["loss_prediction"](loss_pred.detach())  # type: ignore
+
+        loss = loss_decode + loss_pred
 
         return loss, attn_maps
 
