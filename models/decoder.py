@@ -2,7 +2,56 @@ import torch
 from torch import nn
 from x_transformers import Encoder
 from models.positional_encoding import get_2d_sincos_pos_embed
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
+
+from models.attention import TransformerLayer
+
+
+class TransformerDecoderV2(nn.Module):
+
+    def __init__(
+        self,
+        dim=384,
+        dim_context=384,
+        depth=4,
+        resolution=(32, 32),
+        sincos=False,
+    ):
+        super().__init__()
+
+        # self.pe = PE2D(dim)
+        num_patches = resolution[0] * resolution[1]
+        self.resolution = resolution
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+
+        if sincos:
+            pos_embedding = get_2d_sincos_pos_embed(dim, (resolution[0]))
+            self.pos_embedding.data.copy_(torch.from_numpy(pos_embedding))
+            self.pos_embedding.requires_grad_(False)
+
+        layers = []
+        for _ in range(depth):
+            layers.append(TransformerLayer(dim, 8))
+
+        self.transformer = nn.Sequential(*layers)
+
+    def forward(self, x):
+        """
+        args:
+            x: (B, N, D), extracted object representations
+        returns:
+            (B, HW, D), decoded features
+        """
+
+        target = repeat(self.pos_embedding, "1 n d -> (b 1) n d", b=x.shape[0])
+
+        x, ps = pack((x, target), "b * d")
+
+        x = self.transformer(x)
+
+        x, target = unpack(x, ps, "b * d")
+
+        return target
 
 
 class TransformerDecoder(nn.Module):

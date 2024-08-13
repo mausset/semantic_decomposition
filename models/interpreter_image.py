@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import wandb
 from einops import rearrange
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder
+from models.decoder import TransformerDecoder, TransformerDecoderV2
 from models.slot_attention import SA
 from torch import nn
 from torch.optim import AdamW
@@ -68,7 +68,7 @@ class InterpreterBlock(nn.Module):
             n_slots=self.n_slots,
             n_iters=8,
         )
-        self.decoder = TransformerDecoder(
+        self.decoder = TransformerDecoderV2(
             dim=self.dim,
             dim_context=self.slot_dim,
             depth=config["dec_depth"],
