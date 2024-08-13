@@ -2,11 +2,10 @@ import os
 
 import lightning as pl
 import numpy as np
-from PIL import Image, ImageFile
+from PIL import Image
 from pycocotools import mask as mask_utils
 from pycocotools.coco import COCO
 from torch.utils.data import DataLoader, Dataset
-from torchvision.io import read_image
 from torchvision.transforms import (
     CenterCrop,
     Compose,
@@ -166,7 +165,7 @@ class COCOSeg(pl.LightningDataModule):
         self.num_workers = num_workers
 
     def setup(self, stage=None):
-        train_dir = os.path.join(self.data_dir, "train")
+        train_dir = os.path.join(self.data_dir, "train2017")
         train_ann = os.path.join(self.ann_dir, "instances_train2017.json")
 
         self.train = COCODataset(
@@ -176,7 +175,7 @@ class COCOSeg(pl.LightningDataModule):
             resolution=self.resolution,
         )
 
-        val_dir = os.path.join(self.data_dir, "val")
+        val_dir = os.path.join(self.data_dir, "val2017")
         val_ann = os.path.join(self.ann_dir, "instances_val2017.json")
 
         self.val = COCODataset(
