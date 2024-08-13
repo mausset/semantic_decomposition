@@ -192,6 +192,7 @@ class COCOSeg(pl.LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=True,
             shuffle=True,
+            drop_last=True,
         )
 
     def val_dataloader(self):
