@@ -4,7 +4,7 @@ from x_transformers import Encoder
 from models.positional_encoding import get_2d_sincos_pos_embed
 from einops import rearrange, repeat, pack, unpack
 
-from models.attention import TransformerLayer
+from models.attention import TransformerLayer, DualTransformerLayer
 
 
 class TransformerDecoderV2(nn.Module):
@@ -29,11 +29,9 @@ class TransformerDecoderV2(nn.Module):
             self.pos_embedding.data.copy_(torch.from_numpy(pos_embedding))
             self.pos_embedding.requires_grad_(False)
 
-        layers = []
+        self.transformer = nn.ModuleList([])
         for _ in range(depth):
-            layers.append(TransformerLayer(dim, 8))
-
-        self.transformer = nn.Sequential(*layers)
+            self.transformer.append(DualTransformerLayer(dim, 8))
 
     def forward(self, x):
         """
@@ -45,11 +43,12 @@ class TransformerDecoderV2(nn.Module):
 
         target = repeat(self.pos_embedding, "1 n d -> (b 1) n d", b=x.shape[0])
 
-        x, ps = pack((x, target), "b * d")
+        # x, ps = pack((x, target), "b * d")
 
-        x = self.transformer(x)
+        for block in self.transformer:
+            target, x = block(target, x)
 
-        x, target = unpack(x, ps, "b * d")
+        # x, target = unpack(x, ps, "b * d")
 
         return target
 
