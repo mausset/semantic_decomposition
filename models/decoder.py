@@ -31,7 +31,7 @@ class TransformerDecoderV2(nn.Module):
 
         self.transformer = nn.ModuleList([])
         for _ in range(depth):
-            self.transformer.append(CrossAttention(dim, 8))
+            self.transformer.append(DualAttention(dim, 8))
 
     def forward(self, x):
         """
@@ -46,7 +46,7 @@ class TransformerDecoderV2(nn.Module):
         # x, ps = pack((x, target), "b * d")
 
         for block in self.transformer:
-            target = block(target, x)
+            target, x = block(target, x)
 
         # x, target = unpack(x, ps, "b * d")
 
