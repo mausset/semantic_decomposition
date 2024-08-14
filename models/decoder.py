@@ -4,7 +4,7 @@ from x_transformers import Encoder
 from models.positional_encoding import get_2d_sincos_pos_embed
 from einops import rearrange, repeat, pack, unpack
 
-from models.attention import TransformerLayer, DualTransformerLayer
+from models.attention import Attention, DualAttention, CrossAttention
 
 
 class TransformerDecoderV2(nn.Module):
@@ -31,7 +31,7 @@ class TransformerDecoderV2(nn.Module):
 
         self.transformer = nn.ModuleList([])
         for _ in range(depth):
-            self.transformer.append(DualTransformerLayer(dim, 8))
+            self.transformer.append(CrossAttention(dim, 8))
 
     def forward(self, x):
         """
@@ -46,7 +46,7 @@ class TransformerDecoderV2(nn.Module):
         # x, ps = pack((x, target), "b * d")
 
         for block in self.transformer:
-            target, x = block(target, x)
+            target = block(target, x)
 
         # x, target = unpack(x, ps, "b * d")
 
