@@ -73,14 +73,14 @@ class DualTransformerLayer(nn.Module):
         self.attn_out = nn.Linear(self.attn_dim, self.dim)
 
         self.norm1_1 = nn.LayerNorm(self.dim)
-        self.norm2_1 = nn.LayerNorm(self.dim)
+        self.norm1_2 = nn.LayerNorm(self.dim)
         self.mlp1 = nn.Sequential(
             nn.Linear(self.dim, self.dim * expansion),
             nn.GELU(),
             nn.Linear(self.dim * expansion, self.dim),
         )
 
-        self.norm1_2 = nn.LayerNorm(self.dim)
+        self.norm2_1 = nn.LayerNorm(self.dim)
         self.norm2_2 = nn.LayerNorm(self.dim)
         self.mlp2 = nn.Sequential(
             nn.Linear(self.dim, self.dim * expansion),
@@ -116,7 +116,7 @@ class DualTransformerLayer(nn.Module):
         mlp_output = self.mlp1(x)
         x = self.norm1_2(x + mlp_output)
 
-        y = self.norm1_2(y)
+        y = self.norm2_1(y)
         mlp_output = self.mlp2(y)
         y = self.norm2_2(y + mlp_output)
 
