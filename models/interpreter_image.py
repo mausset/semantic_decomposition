@@ -8,7 +8,7 @@ from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder, TransformerDecoderV2
 from models.slot_attention import SA
 from torch import nn
-from torch.optim import AdamW
+from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.metrics import ARIMetric, UnsupervisedMaskIoUMetric
 from utils.plot import plot_attention
@@ -68,9 +68,8 @@ class InterpreterBlock(nn.Module):
             n_slots=self.n_slots,
             n_iters=8,
         )
-        self.decoder = TransformerDecoderV2(
+        self.decoder = TransformerDecoder(
             dim=self.dim,
-            dim_context=self.slot_dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
         )
@@ -90,6 +89,7 @@ class Interpreter(nn.Module):
 
     def __init__(
         self,
+        mode: str,
         base_config: dict,
         block_configs: list[dict],
     ):
@@ -102,10 +102,8 @@ class Interpreter(nn.Module):
         self.blocks = nn.ModuleList([])
         for i in range(len(block_configs)):
             self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
-            n_decode = block_configs[i]["n_slots"]
-
-        for block in self.blocks[:-1]:  # type: ignore
-            block.eval().requires_grad_(False)
+            if mode == "hierarchical":
+                n_decode = block_configs[i]["n_slots"]
 
     def forward(self, x):
 
@@ -120,21 +118,37 @@ class Interpreter(nn.Module):
 
         return x, attn_maps
 
-    # Assumes that only the last block is to be trained
-    def forward_train(self, x):
+    def forward_hierarchical(self, x):
         attn_maps = []
         with torch.no_grad():
             x = self.base(x)
 
-            for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map = block(x)
-                attn_maps.append(attn_map)
+        target = [x]
+        decoded = []
+        for block in self.blocks:  # type: ignore
+            x, attn_map = block(x)
+            attn_maps.append(attn_map)
 
-        target = x.clone()
+            dec = block.decoder(x)
+            decoded.append(dec)
 
-        x, attn_map = self.blocks[-1](x)
-        attn_maps.append(attn_map)
-        decoded = self.blocks[-1].decoder(x)
+            x = x.detach()
+            target.append(x)
+
+        return decoded, target, attn_maps
+
+    def forward_base_target(self, x):
+        with torch.no_grad():
+            x = self.base(x)
+        attn_maps = []
+        target = [x] * len(self.blocks)
+        decoded = []
+        for block in self.blocks:
+            x, attn_map = block(x)
+            dec = block.decoder(x)
+            decoded.append(dec)
+            attn_maps.append(attn_map)
+            # x = x.detach()
 
         return decoded, target, attn_maps
 
@@ -143,6 +157,7 @@ class InterpreterTrainer(pl.LightningModule):
 
     def __init__(
         self,
+        mode: str,
         base_config: dict,
         block_configs: list[dict],
         optimizer_config: dict = {},
@@ -150,27 +165,23 @@ class InterpreterTrainer(pl.LightningModule):
     ):
         super().__init__()
 
-        self.interpreter = torch.compile(Interpreter(base_config, block_configs))
+        self.model = torch.compile(Interpreter(mode, base_config, block_configs))
 
         if checkpoint_path is not None:
             self.load_state_dict(
                 torch.load(checkpoint_path)["state_dict"], strict=False
             )
 
-        self.patch_size = self.interpreter.base.patch_size  # type: ignore
+        self.mode = mode
+        self.patch_size = self.model.base.patch_size  # type: ignore
         self.resolution = base_config["resolution"]
-        self.n_blocks = len(self.interpreter.blocks)  # type: ignore
-        self.active_block = self.n_blocks - 1
+        self.n_blocks = len(self.model.blocks)  # type: ignore
         self.optimizer_config = optimizer_config
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
         self.metrics = nn.ModuleDict(
-            {
-                "norm": MeanMetric(),
-                "var": MeanMetric(),
-                "loss": MeanMetric(),
-            }
+            {f"loss_{i}": MeanMetric() for i in range(self.n_blocks)}
         )
 
         self.val_metrics = nn.ModuleDict(
@@ -197,14 +208,15 @@ class InterpreterTrainer(pl.LightningModule):
 
     def forward(self, x, stage="train"):
 
-        decoded, target, attn_maps = self.interpreter.forward_train(x)  # type: ignore
+        if self.mode == "base_target":
+            decoded, target, attn_maps = self.model.forward_base_target(x)  # type: ignore
+        else:
+            decoded, target, attn_maps = self.model.forward_hierarchical(x)  # type: ignore
 
-        loss = self.loss_fn(decoded, target).mean()
-
-        flat = rearrange(decoded, "b n d -> (b n) d")
-        self.metrics["norm"](torch.norm(flat.detach(), dim=1).mean())  # type: ignore
-        self.metrics["var"](torch.var(flat.detach(), dim=0).mean())  # type: ignore
-        self.metrics["loss"](loss.detach())  # type: ignore
+        loss = 0
+        for i, (d, t) in enumerate(zip(decoded, target)):
+            loss += self.loss_fn(d, t).mean()
+            self.metrics[f"loss_{i}"](loss.detach())  # type: ignore
 
         return loss, attn_maps
 
@@ -215,14 +227,14 @@ class InterpreterTrainer(pl.LightningModule):
             if torch.isnan(value):
                 continue
             self.log(
-                f"train/{k}_{self.active_block}",
+                f"train/{k}",
                 value,
                 prog_bar=True,
                 sync_dist=True,
             )
             v.reset()
 
-    def training_step(self, x, batch_idx: int):
+    def training_step(self, x, batch_idx: int):  # type: ignore
 
         x = x
 
@@ -238,7 +250,7 @@ class InterpreterTrainer(pl.LightningModule):
         self.image = None
 
     @torch.no_grad()
-    def validation_step(self, x):
+    def validation_step(self, x):  # type: ignore
         x, *masks = x
 
         loss, attn_maps = self.forward(x)
@@ -262,7 +274,7 @@ class InterpreterTrainer(pl.LightningModule):
                 patch_size=self.patch_size,
             )
             log_dict = {
-                f"attention_{self.active_block}": wandb.Image(
+                f"attention": wandb.Image(
                     (attn_plot.cpu().permute(1, 2, 0).numpy() * 255).astype("uint8")
                 )
             }
