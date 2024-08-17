@@ -200,7 +200,7 @@ class InterpreterTrainer(pl.LightningModule):
         block_configs: list[dict],
         optimizer_config: dict = {},
         log_config: dict = {},
-        schedule_config: dict | None = {},
+        layer_schedule: dict | None = {},
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -218,7 +218,7 @@ class InterpreterTrainer(pl.LightningModule):
         self.n_blocks = len(self.model.blocks)  # type: ignore
         self.optimizer_config = optimizer_config
         self.log_config = log_config
-        self.schedule_config = schedule_config
+        self.layer_schedule = layer_schedule
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
@@ -230,15 +230,15 @@ class InterpreterTrainer(pl.LightningModule):
 
     @property
     def current_block(self):
-        if self.schedule_config is None:
+        if self.layer_schedule is None:
             return self.n_blocks
 
-        schedule = sorted(list(self.schedule_config.keys()))
+        schedule = sorted(list(self.layer_schedule.keys()))
 
         current = 0
         for k in schedule:
-            if self.current_epoch >= self.schedule_config[k]:
-                current = self.schedule_config[k]
+            if self.current_epoch >= self.layer_schedule[k]:
+                current = self.layer_schedule[k]
 
         return current
 
