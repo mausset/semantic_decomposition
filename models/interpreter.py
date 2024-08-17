@@ -230,11 +230,13 @@ class InterpreterTrainer(pl.LightningModule):
         for i, (d, t) in enumerate(zip(decoded, target)):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
-            loss += self.loss_fn(d, t.detach()).mean()
-            if i > 0:
-                loss += self.loss_fn(t, d.detach()).mean()
+            l = self.loss_fn(d, t.detach()).mean()
 
-            self.metric_loggers[f"loss_{i}"](loss.detach())
+            if i > 0:
+                l += 0.1*self.loss_fn(t, d.detach()).mean()
+
+            self.metric_loggers[f"loss_{i}"](l.detach())
+            loss += l
 
         return loss, attn_maps
 
