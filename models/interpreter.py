@@ -166,7 +166,7 @@ class Interpreter(nn.Module):
             self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
             n_decode = block_configs[i]["n_slots"]
 
-    def forward(self, x):
+    def forward(self, x, current_block=None):
 
         b = x.shape[0]
 
@@ -175,10 +175,14 @@ class Interpreter(nn.Module):
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
+        blocks = self.blocks
+        if current_block is not None:
+            blocks = blocks[: current_block + 1]
+
         attn_maps = []
         features = [x]
         decoded = []
-        for block in self.blocks:  # type: ignore
+        for block in blocks:  # type: ignore
             x, attn_map = block(x)
             features.append(x)
             attn_maps.append(attn_map)
@@ -196,6 +200,7 @@ class InterpreterTrainer(pl.LightningModule):
         block_configs: list[dict],
         optimizer_config: dict = {},
         log_config: dict = {},
+        schedule_config: dict | None = {},
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -213,6 +218,7 @@ class InterpreterTrainer(pl.LightningModule):
         self.n_blocks = len(self.model.blocks)  # type: ignore
         self.optimizer_config = optimizer_config
         self.log_config = log_config
+        self.schedule_config = schedule_config
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
@@ -222,21 +228,32 @@ class InterpreterTrainer(pl.LightningModule):
 
         self.gif = None
 
+    @property
+    def current_block(self):
+        if self.schedule_config is None:
+            return self.n_blocks
+
+        schedule = sorted(list(self.schedule_config.keys()))
+
+        current = 0
+        for k in schedule:
+            if self.current_epoch >= self.schedule_config[k]:
+                current = self.schedule_config[k]
+
+        return current
+
     def forward(self, x, stage="train"):
 
-        decoded, target, attn_maps = self.model.forward(x)  # type: ignore
+        decoded, target, attn_maps = self.model.forward(x, current_block=self.current_block)  # type: ignore
 
         loss = 0
         for i, (d, t) in enumerate(zip(decoded, target)):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
-            l = self.loss_fn(d, t.detach()).mean()
+            local_loss = self.loss_fn(d, t.detach()).mean()
 
-            if i > 0:
-                l += 0.1*self.loss_fn(t, d.detach()).mean()
-
-            self.metric_loggers[f"loss_{i}"](l.detach())
-            loss += l
+            self.metric_loggers[f"loss_{i}"](local_loss.detach())
+            loss += local_loss
 
         return loss, attn_maps
 
