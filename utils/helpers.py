@@ -21,3 +21,26 @@ def apply_mask(x, mask):
     gathered = torch.gather(x, 1, indices)
 
     return gathered
+
+
+@torch.no_grad()
+def attn_to_register_mask(attn, n_registers):
+    """
+    attn: (B, N, N)
+    """
+    attn = attn[:, :n_registers]
+
+    mask = (
+        torch.nn.functional.one_hot(attn.argmax(dim=1), num_classes=n_registers)
+        .permute(0, 2, 1)
+        .float()
+    )
+    mask[:, :n_registers, :n_registers] = 0
+    for i in range(n_registers):
+        mask[:, i, i] = 1
+
+    masks = []
+    for i in range(n_registers):
+        masks.append(torch.bmm(mask[:, i, None].transpose(1, 2), mask[:, i, None]))
+
+    return torch.stack(masks, dim=1).sum(dim=1).bool()

@@ -1,6 +1,5 @@
 import lightning as pl
 
-# from models.jepa import JEPA
 import timm
 import torch
 import wandb
@@ -10,12 +9,13 @@ from models.decoder import TransformerDecoder
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
-from torch.optim import AdamW
+from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.helpers import block_causal_mask
 from utils.schedulers import WarmupCosineSchedule
 from utils.plot import (
     plot_attention_interpreter_hierarchical,
+    plot_attention_hierarchical,
     plot_attention_simple,
 )
 from x_transformers import Encoder
@@ -60,13 +60,14 @@ class InterpreterBlock(nn.Module):
         self.slot_dim = config["slot_dim"]
         self.n_slots = config["n_slots"]
         self.time_shrink = config.get("time_shrink", 1)
-        self.context_len = config["context_len"]
 
         self.decode_res = next(
             (i, n_decode // i)
             for i in range(int(n_decode**0.5), 0, -1)
             if n_decode % i == 0
         )
+        if self.time_shrink > 1:
+            self.decode_res = (self.time_shrink, *self.decode_res)
 
         print(f"Decode res: {self.decode_res}")
 
@@ -78,16 +79,19 @@ class InterpreterBlock(nn.Module):
             n_slots=self.n_slots,
             n_iters=8,
         )
-        self.predictor = Encoder(
-            dim=self.slot_dim,
-            depth=config["pred_depth"],
-            ff_glu=True,
-            ff_swish=True,
-            attn_flash=True,
-        )
+
+        if "enc_depth" in config:
+            self.encoder = Encoder(
+                dim=self.dim,
+                depth=config["enc_depth"],
+                ff_glu=True,
+                attn_flash=True,
+            )
+        else:
+            self.encoder = None
+
         self.decoder = TransformerDecoder(
             dim=self.dim,
-            dim_context=self.slot_dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
         )
@@ -95,10 +99,6 @@ class InterpreterBlock(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
-
-    def update_target(self):
-        for p, target_p in zip(self.encoder.parameters(), self.target.parameters()):
-            target_p.data.mul_(self.alpha).add_(p.data.detach(), alpha=1 - self.alpha)
 
     def _time_pe(self, b, t, n, d):
         pe = self.time_pe(torch.zeros((b, t, d), device=self.device))
@@ -125,51 +125,25 @@ class InterpreterBlock(nn.Module):
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
+        if self.encoder is not None:
+            x = self.encoder(x)
 
         slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
         return slots, attn_map
 
-    def predict_decode(self, slots):
-        slots = slots[:, :-1]
-        context_len = min(self.context_len, slots.shape[1])
-        if slots.shape[1] > self.context_len:
-            slack = slots.shape[1] % self.context_len
-            slots = slots[:, : slots.shape[1] - slack]
+    def decode(self, x):
+        b, *_ = x.shape
 
-        slots = rearrange(slots, "b (t s) n d -> (b t) s n d", s=context_len)
-
-        b, t, n, *_ = slots.shape
-
-        slots = slots + self._time_pe(b, t, n, self.slot_dim)
-        slots = rearrange(slots, "b t n d -> b (t n) d")
-
-        mask = block_causal_mask(t, n, device=self.device)
-        predictions = self.predictor(slots, attn_mask=mask)
-        predictions = rearrange(predictions, "b (t n) d -> (b t) n d", t=t)
-
-        pred_dec = self.decoder(predictions)
-
-        pred_dec = rearrange(
-            pred_dec,
-            "(b t) (sf n) d -> b (t sf) n d",
+        x = rearrange(x, "b t ... -> (b t) ...")
+        x = self.decoder(x)
+        x = rearrange(
+            x,
+            "(b t) (s n) d -> b (t s) n d",  # Ablate this
             b=b,
-            sf=self.time_shrink,
+            s=self.time_shrink,
         )
-
-        return pred_dec
-
-    def make_target(self, x):
-        x = self.shrink_time(x)
-        x = x[:, 1:]
-
-        context_len = min(self.context_len, x.shape[1])
-        if x.shape[1] > self.context_len:
-            slack = x.shape[1] % self.context_len
-            x = x[:, : x.shape[1] - slack]
-        x = rearrange(x, "b (t s) n d -> (b t) s n d", s=context_len)
-        x = rearrange(x, "b t (sf n) ... -> b (t sf) n ...", sf=self.time_shrink)
 
         return x
 
@@ -180,12 +154,8 @@ class Interpreter(nn.Module):
         self,
         base_config: dict,
         block_configs: list[dict],
-        active_block: int | None = None,
     ):
         super().__init__()
-
-        if active_block is not None:
-            block_configs = block_configs[: active_block + 1]
 
         self.base = TimmWrapper(**base_config).eval().requires_grad_(False)
 
@@ -196,45 +166,26 @@ class Interpreter(nn.Module):
             self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
             n_decode = block_configs[i]["n_slots"]
 
-        for block in self.blocks[:-1]:  # type: ignore
-            block.eval().requires_grad_(False)
-
     def forward(self, x):
 
         b = x.shape[0]
-        x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.base(x)
-        x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
-        attn_maps = []
-        features = [x]
-        for block in self.blocks:  # type: ignore
-            x, attn_map = block(x)
-            features.append(x)
-            attn_maps.append(attn_map)
-
-        return x, attn_maps
-
-    # Assumes that only the last block is to be trained
-    def forward_train(self, x):
-        attn_maps = []
         with torch.no_grad():
-            b = x.shape[0]
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
 
-            for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map = block(x)
-                attn_maps.append(attn_map)
+        attn_maps = []
+        features = [x]
+        decoded = []
+        for block in self.blocks:  # type: ignore
+            x, attn_map = block(x)
+            features.append(x)
+            attn_maps.append(attn_map)
+            decoded.append(block.decode(x))
+            x = x.detach()
 
-        target = self.blocks[-1].make_target(x)
-
-        x, attn_map = self.blocks[-1](x)
-        attn_maps.append(attn_map)
-        pred = self.blocks[-1].predict_decode(x)
-
-        return pred, target, attn_maps
+        return decoded, features, attn_maps
 
 
 class InterpreterTrainer(pl.LightningModule):
@@ -243,67 +194,58 @@ class InterpreterTrainer(pl.LightningModule):
         self,
         base_config: dict,
         block_configs: list[dict],
-        active_block: int | None = None,
         optimizer_config: dict = {},
         log_config: dict = {},
         checkpoint_path: str | None = None,
     ):
         super().__init__()
 
-        self.interpreter = torch.compile(
-            Interpreter(base_config, block_configs, active_block)
-        )
+        self.model = Interpreter(base_config, block_configs)
 
         if checkpoint_path is not None:
             self.load_state_dict(
                 torch.load(checkpoint_path)["state_dict"], strict=False
             )
 
-        self.patch_size = self.interpreter.base.patch_size  # type: ignore
+        self.patch_size = self.model.base.patch_size  # type: ignore
         self.resolution = base_config["resolution"]
-        self.time_shrink = [block.time_shrink for block in self.interpreter.blocks]  # type: ignore
-        self.n_blocks = len(self.interpreter.blocks)  # type: ignore
+        self.time_shrink = [block.time_shrink for block in self.model.blocks]  # type: ignore
+        self.n_blocks = len(self.model.blocks)  # type: ignore
         self.optimizer_config = optimizer_config
         self.log_config = log_config
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
         self.metric_loggers = nn.ModuleDict(
-            {
-                "norm": MeanMetric(),
-                "var": MeanMetric(),
-                "loss": MeanMetric(),
-            }
+            {f"loss_{i}": MeanMetric() for i in range(self.n_blocks)}
         )
 
         self.gif = None
 
     def forward(self, x, stage="train"):
 
-        pred, target, attn_maps = self.interpreter.forward_train(x)  # type: ignore
+        decoded, target, attn_maps = self.model.forward(x)  # type: ignore
 
-        pred = rearrange(pred, "b t ... -> (b t) ...")
-        target = rearrange(target, "b t ... -> (b t) ...")
+        loss = 0
+        for i, (d, t) in enumerate(zip(decoded, target)):
+            d = rearrange(d, "b t ... -> (b t) ...")
+            t = rearrange(t, "b t ... -> (b t) ...")
+            loss += self.loss_fn(d, t.detach()).mean()
+            if i > 0:
+                loss += self.loss_fn(t, d.detach()).mean()
 
-        loss = self.loss_fn(pred, target.detach()).mean()
-
-        flat = rearrange(pred, "bt n d -> (bt n) d")
-        self.metric_loggers["norm"](torch.norm(flat.detach(), dim=1).mean())  # type: ignore
-        self.metric_loggers["var"](torch.var(flat.detach(), dim=0).mean())  # type: ignore
-        self.metric_loggers["loss"](loss.detach())  # type: ignore
+            self.metric_loggers[f"loss_{i}"](loss.detach())
 
         return loss, attn_maps
 
-    def log_metrics(self, batch_idx):
-        if batch_idx % self.trainer.accumulate_grad_batches != 0:
-            return
+    def log_metrics(self):
 
         for k, v in self.metric_loggers.items():
             value = v.compute()
             if torch.isnan(value):
                 continue
             self.log(
-                f"train/{k}_{self.n_blocks-1}",
+                f"train/{k}",
                 value,
                 prog_bar=True,
                 sync_dist=True,
@@ -314,31 +256,33 @@ class InterpreterTrainer(pl.LightningModule):
         if self.gif is not None:
             self.gif = None
 
-    def training_step(self, x, batch_idx: int):
+    def training_step(self, x, batch_idx: int):  # type: ignore
 
         loss, attn_maps = self.forward(x)
 
-        self.log_metrics(batch_idx)
+        if batch_idx % self.trainer.accumulate_grad_batches == 0:
+            self.log_metrics()
 
         if (
             isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
             and self.trainer.is_global_zero
             and self.gif is None
         ):
-            attn_plot = plot_attention_simple(
-                imgs=x.detach(),
-                attn_maps=[attn.detach() for attn in attn_maps],
-                res=self.resolution,
-                patch_size=self.patch_size,
-                n_frames=self.log_config["n_frames"],
-            )
-            log_dict = {
-                f"attention_{self.n_blocks-1}": wandb.Video(
+            with torch.no_grad():
+                attn_plots = plot_attention_hierarchical(
+                    imgs=x,
+                    attn_maps=attn_maps,
+                    res=self.resolution[0],
+                    patch_size=self.patch_size,
+                )
+
+            log_dict = {}
+            for i, attn_plot in enumerate(attn_plots):
+                log_dict[f"attention_{i}"] = wandb.Video(
                     (attn_plot.cpu().numpy() * 255).astype("uint8"),
                     fps=self.log_config["fps"],
                     format="gif",
                 )
-            }
             self.logger.experiment.log(log_dict)  # type: ignore
 
             # self.logger.experiment.log(log_dict)  # type: ignore

@@ -135,6 +135,33 @@ def plot_attention_interpreter_hierarchical(
     return attn_plots
 
 
+def plot_attention_hierarchical(
+    imgs,
+    attn_maps,
+    res,
+    patch_size,
+):
+    r = 1
+    for i in range(1, len(attn_maps)):
+        t = attn_maps[i].shape[1] // attn_maps[i - 1].shape[2]
+        a = repeat(attn_maps[i], "b (t n) ... -> (b r t) n ...", t=t, r=r)
+        attn_maps[i] = torch.bmm(attn_maps[i - 1], a)
+        r *= t
+
+    attn_plots = []
+    for i in range(len(attn_maps)):
+        attn_plots.append(
+            plot_attention_interpreter(
+                imgs[0],
+                attn_maps[i][: imgs[0].shape[0]],
+                res=res,
+                patch_size=patch_size,
+            )
+        )
+
+    return attn_plots
+
+
 def plot_attention(
     img,
     attn_map,

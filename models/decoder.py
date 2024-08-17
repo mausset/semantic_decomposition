@@ -6,6 +6,8 @@ from einops import rearrange, repeat, pack, unpack
 
 from models.attention import Attention, DualAttention, AttentionDecode
 
+from functools import reduce
+
 
 class TransformerDecoderV2(nn.Module):
 
@@ -64,8 +66,11 @@ class TransformerDecoder(nn.Module):
     ):
         super().__init__()
 
-        # self.pe = PE2D(dim)
-        num_patches = resolution[0] * resolution[1]
+        assert not (
+            len(resolution) > 2 and sincos
+        ), "Only 2D SinCos positional encoding supported"
+
+        num_patches = reduce(lambda x, y: x * y, resolution, 1)
         self.resolution = resolution
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
 
