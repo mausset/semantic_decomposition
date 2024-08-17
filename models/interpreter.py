@@ -237,7 +237,7 @@ class InterpreterTrainer(pl.LightningModule):
 
         current = 0
         for k in schedule:
-            if self.current_epoch >= self.layer_schedule[k]:
+            if self.current_epoch >= k:
                 current = self.layer_schedule[k]
 
         return current
