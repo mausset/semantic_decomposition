@@ -94,6 +94,7 @@ class InterpreterBlock(nn.Module):
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
+            sincos=True,
         )
 
     @property
