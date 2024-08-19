@@ -134,16 +134,16 @@ class AttentionDecode(nn.Module):
         self.attn_dim = heads * self.HEAD_DIM
         self.expansion = expansion
 
-        self.to_q_cross = nn.Linear(self.dim, self.attn_dim)
-        self.to_k_cross = nn.Linear(self.dim, self.attn_dim)
-        self.to_v_cross = nn.Linear(self.dim, self.attn_dim)
-        self.attn_out_cross = nn.Linear(self.attn_dim, self.dim)
+        self.to_q_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_k_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_v_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.attn_out_cross = nn.Linear(self.attn_dim, self.dim, bias=False)
         self.norm_cross = nn.LayerNorm(self.dim)
 
-        self.to_q_self = nn.Linear(self.dim, self.attn_dim)
-        self.to_k_self = nn.Linear(self.dim, self.attn_dim)
-        self.to_v_self = nn.Linear(self.dim, self.attn_dim)
-        self.attn_out_self = nn.Linear(self.attn_dim, self.dim)
+        self.to_q_self = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_k_self = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_v_self = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.attn_out_self = nn.Linear(self.attn_dim, self.dim, bias=False)
         self.norm_self = nn.LayerNorm(self.dim)
 
         self.norm_mlp = nn.LayerNorm(self.dim)
