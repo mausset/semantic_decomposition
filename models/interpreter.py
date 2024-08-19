@@ -276,6 +276,9 @@ class InterpreterTrainer(pl.LightningModule):
             self.gif = None
 
     def training_step(self, x, batch_idx: int):  # type: ignore
+        # if training with images
+        if len(x.shape) == 4:
+            x = rearrange(x, "b c h w -> b 1 c h w")
 
         loss, attn_maps = self.forward(x)
 
