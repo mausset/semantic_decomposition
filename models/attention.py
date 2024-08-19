@@ -14,11 +14,11 @@ class Attention(nn.Module):
         self.attn_dim = heads * self.HEAD_DIM
         self.expansion = expansion
 
-        self.to_q = nn.Linear(self.dim, self.attn_dim)
-        self.to_k = nn.Linear(self.dim, self.attn_dim)
-        self.to_v = nn.Linear(self.dim, self.attn_dim)
+        self.to_q = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_k = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_v = nn.Linear(self.dim, self.attn_dim, bias=False)
 
-        self.attn_out = nn.Linear(self.attn_dim, self.dim)
+        self.attn_out = nn.Linear(self.attn_dim, self.dim, bias=False)
 
         self.norm1 = nn.LayerNorm(self.dim)
         self.norm2 = nn.LayerNorm(self.dim)
@@ -66,11 +66,11 @@ class DualAttention(nn.Module):
         self.attn_dim = heads * self.HEAD_DIM
         self.expansion = expansion
 
-        self.to_q = nn.Linear(self.dim, self.attn_dim)
-        self.to_k = nn.Linear(self.dim, self.attn_dim)
-        self.to_v = nn.Linear(self.dim, self.attn_dim)
+        self.to_q = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_k = nn.Linear(self.dim, self.attn_dim, bias=False)
+        self.to_v = nn.Linear(self.dim, self.attn_dim, bias=False)
 
-        self.attn_out = nn.Linear(self.attn_dim, self.dim)
+        self.attn_out = nn.Linear(self.attn_dim, self.dim, bias=False)
 
         self.norm1_1 = nn.LayerNorm(self.dim)
         self.norm1_2 = nn.LayerNorm(self.dim)

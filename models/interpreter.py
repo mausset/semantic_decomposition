@@ -5,13 +5,12 @@ import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder
+from models.decoder import TransformerDecoder, TransformerDecoderOld
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
-from utils.helpers import block_causal_mask
 from utils.schedulers import WarmupCosineSchedule
 from utils.plot import (
     plot_attention_interpreter_hierarchical,
@@ -90,7 +89,7 @@ class InterpreterBlock(nn.Module):
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoder(
+        self.decoder = TransformerDecoderOld(
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
