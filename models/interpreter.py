@@ -66,7 +66,10 @@ class InterpreterBlock(nn.Module):
             if n_decode % i == 0
         )
         if self.time_shrink > 1:
-            self.decode_res = (self.time_shrink, *self.decode_res)
+            self.decode_res = (
+                self.time_shrink,
+                self.decode_res[0] * self.decode_res[1],
+            )
 
         print(f"Decode res: {self.decode_res}")
 

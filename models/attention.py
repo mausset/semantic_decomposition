@@ -1,5 +1,5 @@
 import torch.nn.functional as F
-from einops import pack, unpack
+from einops import pack, rearrange, unpack
 from torch import nn
 
 
@@ -123,6 +123,22 @@ class DualAttention(nn.Module):
         return x, y
 
 
+class SwiGLU(nn.Module):
+
+    def __init__(self, dim, expansion=4):
+        super().__init__()
+
+        self.dim = dim
+        self.project_in = nn.Linear(dim, dim * expansion * 2)
+        self.project_out = nn.Linear(dim * expansion, dim)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        x, y = self.project_in(x).chunk(2, dim=-1)
+
+        return self.project_out(x * self.act(y))
+
+
 class AttentionDecode(nn.Module):
 
     HEAD_DIM = 64
@@ -134,67 +150,64 @@ class AttentionDecode(nn.Module):
         self.attn_dim = heads * self.HEAD_DIM
         self.expansion = expansion
 
+        self.norm_cross_target = nn.LayerNorm(self.dim)
         self.to_q_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.to_k_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.to_v_cross = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.attn_out_cross = nn.Linear(self.attn_dim, self.dim, bias=False)
-        self.norm_cross = nn.LayerNorm(self.dim)
 
+        self.norm_self = nn.LayerNorm(self.dim)
         self.to_q_self = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.to_k_self = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.to_v_self = nn.Linear(self.dim, self.attn_dim, bias=False)
         self.attn_out_self = nn.Linear(self.attn_dim, self.dim, bias=False)
-        self.norm_self = nn.LayerNorm(self.dim)
 
         self.norm_mlp = nn.LayerNorm(self.dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.dim, self.dim * expansion),
-            nn.GELU(),
-            nn.Linear(self.dim * expansion, self.dim),
-        )
+        self.mlp = SwiGLU(dim, expansion)
+        self.norm_final = nn.LayerNorm(self.dim)
 
     def forward(self, target, context):
 
-        b1, n1, _ = target.shape
-        b2, n2, _ = context.shape
+        target = self.norm_cross_target(target)
 
         # Linear projections
         q = self.to_q_cross(target)
         k = self.to_k_cross(context)
         v = self.to_v_cross(context)
 
-        q = q.view(b1, n1, self.heads, self.HEAD_DIM).transpose(1, 2)
-        k = k.view(b2, n2, self.heads, self.HEAD_DIM).transpose(1, 2)
-        v = v.view(b2, n2, self.heads, self.HEAD_DIM).transpose(1, 2)
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
 
         with nn.attention.sdpa_kernel(nn.attention.SDPBackend.FLASH_ATTENTION):
-            attn_output = F.scaled_dot_product_attention(q, k, v)
+            attn_out = F.scaled_dot_product_attention(q, k, v)
 
-        attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(b1, n1, self.attn_dim)
-        )
-        attn_output = self.attn_out_cross(attn_output)
+        attn_out = rearrange(attn_out, "b h n d -> b n (h d)")
+        attn_out = self.attn_out_cross(attn_out)
 
-        target = self.norm_cross(target + attn_output)
+        target = target + attn_out
+
+        target = self.norm_self(target)
 
         q = self.to_q_self(target)
         k = self.to_k_self(target)
         v = self.to_v_self(target)
 
-        q = q.view(b1, n1, self.heads, self.HEAD_DIM).transpose(1, 2)
-        k = k.view(b1, n1, self.heads, self.HEAD_DIM).transpose(1, 2)
-        v = v.view(b1, n1, self.heads, self.HEAD_DIM).transpose(1, 2)
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
 
         with nn.attention.sdpa_kernel(nn.attention.SDPBackend.FLASH_ATTENTION):
-            attn_output = F.scaled_dot_product_attention(q, k, v)
+            attn_out = F.scaled_dot_product_attention(q, k, v)
 
-        attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(b1, n1, self.attn_dim)
-        )
-        attn_output = self.attn_out_self(attn_output)
+        attn_out = rearrange(attn_out, "b h n d -> b n (h d)")
+        attn_out = self.attn_out_self(attn_out)
 
-        target = self.norm_self(target + attn_output)
-        mlp_output = self.mlp(target)
-        target = self.norm_mlp(target + mlp_output)
+        target = target + attn_out
+        mlp_in = self.norm_mlp(target)
+        mlp_out = self.mlp(mlp_in)
+        target = target + mlp_out
+
+        target = self.norm_final(target)
 
         return target
