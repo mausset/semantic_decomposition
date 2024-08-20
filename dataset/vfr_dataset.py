@@ -72,9 +72,8 @@ class VideoDataset(pl.LightningDataModule):
         super().__init__()
 
         self.pipeline_config = pipeline_config
-        self.filenames = list(
-            pathlib.Path(pipeline_config["file_root"]).rglob("*.webm")
-        )
+        filenames = list(pathlib.Path(pipeline_config["file_root"]).rglob("*.webm"))
+        self.pipeline_config["filenames"] = filenames
         del self.pipeline_config["file_root"]
 
     def setup(self, stage=None):  # type: ignore
