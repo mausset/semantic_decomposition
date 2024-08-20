@@ -75,6 +75,7 @@ class VideoDataset(pl.LightningDataModule):
         self.filenames = list(
             pathlib.Path(pipeline_config["file_root"]).rglob("*.webm")
         )
+        del self.pipeline_config["file_root"]
 
     def setup(self, stage=None):  # type: ignore
         device_id = self.trainer.local_rank  # type: ignore
