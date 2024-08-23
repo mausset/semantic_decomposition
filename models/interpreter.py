@@ -92,7 +92,7 @@ class InterpreterBlock(nn.Module):
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoderOld(
+        self.decoder = TransformerDecoder(
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
@@ -169,8 +169,31 @@ class Interpreter(nn.Module):
             self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
             n_decode = block_configs[i]["n_slots"]
 
-    def forward(self, x, current_block=None):
+    def setup_only_last(self):
+        for block in self.blocks[:-1]:  # type: ignore
+            block.eval().requires_grad_(False)
 
+    def train_only_last(self, x):
+        b = x.shape[0]
+
+        attn_maps = []
+        with torch.no_grad():
+            x = rearrange(x, "b t ... -> (b t) ...")
+            x = self.base(x)
+            x = rearrange(x, "(b t) ... -> b t ...", b=b)
+            for block in self.blocks[:-1]:  # type: ignore
+                x, attn_map = block(x)
+                attn_maps.append(attn_map)
+                x = x.detach()
+
+        features = [x]
+        x, attn_map = self.blocks[-1](x)
+        attn_maps.append(attn_map)
+        decoded = [self.blocks[-1].decode(x)]
+
+        return decoded, features, attn_maps
+
+    def forward(self, x, current_block=None):
         b = x.shape[0]
 
         with torch.no_grad():
@@ -204,6 +227,7 @@ class InterpreterTrainer(pl.LightningModule):
         optimizer_config: dict = {},
         log_config: dict = {},
         layer_schedule: dict | None = {},
+        only_last: bool = False,
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -222,6 +246,10 @@ class InterpreterTrainer(pl.LightningModule):
         self.optimizer_config = optimizer_config
         self.log_config = log_config
         self.layer_schedule = layer_schedule
+        self.only_last = only_last
+
+        if self.only_last:
+            self.model.setup_only_last()
 
         self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
 
@@ -247,10 +275,14 @@ class InterpreterTrainer(pl.LightningModule):
 
     def forward(self, x, stage="train"):
 
-        decoded, target, attn_maps = self.model.forward(x, current_block=self.current_block)  # type: ignore
+        if self.only_last:
+            decoded, target, attn_maps = self.model.train_only_last(x)
+        else:
+            decoded, target, attn_maps = self.model.forward(x, current_block=self.current_block)  # type: ignore
 
         loss = 0
-        for i, (d, t) in enumerate(zip(decoded, target)):
+        start = len(self.model.blocks) - 1 if self.only_last else 0
+        for i, (d, t) in enumerate(zip(decoded, target), start=start):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
             local_loss = self.loss_fn(d, t.detach()).mean()

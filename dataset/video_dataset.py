@@ -69,7 +69,7 @@ class LightningWrapper(DALIGenericIterator):
         return out[0]["data"]
 
 
-class WalkingTours(pl.LightningDataModule):
+class VideoDataset(pl.LightningDataModule):
 
     def __init__(self, pipeline_config: dict):
         super().__init__()
@@ -77,25 +77,25 @@ class WalkingTours(pl.LightningDataModule):
         self.pipeline_config = pipeline_config
 
     def setup(self, stage=None):  # type: ignore
-        print("Setting up WalkingTours dataset...")
+        print("Setting up video dataset...")
         device_id = self.trainer.local_rank  # type: ignore
         shard_id = self.trainer.global_rank  # type: ignore
         num_shards = self.trainer.world_size  # type: ignore
 
-        wt_pipeline_train = video_pipe(
+        pipeline_train = video_pipe(
             **self.pipeline_config,
             device_id=device_id,
             shard_id=shard_id,
             num_shards=num_shards,
         )
         self.train_loader = LightningWrapper(
-            wt_pipeline_train,
+            pipeline_train,
             reader_name="Reader",
             output_map=["data"],
             last_batch_policy=LastBatchPolicy.DROP,
         )
 
-        print("WalkingTours dataset setup complete.")
+        print("Video dataset setup complete.")
 
     def train_dataloader(self):
         return self.train_loader
