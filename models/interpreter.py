@@ -235,6 +235,7 @@ class InterpreterTrainer(pl.LightningModule):
         log_config: dict = {},
         layer_schedule: dict | None = {},
         only_last: bool = False,
+        loss: str = "sinkhorn",
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -258,7 +259,12 @@ class InterpreterTrainer(pl.LightningModule):
         if self.only_last:
             self.model.setup_only_last()
 
-        self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
+        if loss == "sinkhorn":
+            self.loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.5)
+        elif loss == "mse":
+            self.loss_fn = nn.MSELoss()
+        else:
+            raise ValueError(f"Unknown loss: {loss}")
 
         self.metric_loggers = nn.ModuleDict(
             {f"loss_{i}": MeanMetric() for i in range(self.n_blocks)}
