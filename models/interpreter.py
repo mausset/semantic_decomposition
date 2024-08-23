@@ -82,6 +82,7 @@ class InterpreterBlock(nn.Module):
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
+            sampler=config.get("sampler", "gaussian"),
             n_iters=8,
         )
 
