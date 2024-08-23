@@ -27,7 +27,7 @@ def denormalize_imagenet(img):
 def plot_attention_interpreter(
     imgs,
     attn_maps,
-    res=224,
+    res=(224, 224),
     patch_size=14,
     palette="tab20",
     alpha=0.4,
@@ -42,7 +42,7 @@ def plot_attention_interpreter(
     colors = repeat(colors, "n c -> 1 n c 1 1")
 
     # cat_imgs = []
-    attn_map = rearrange(attn_maps, "b (h w) n -> b n h w", h=res // patch_size)
+    attn_map = rearrange(attn_maps, "b (h w) n -> b n h w", h=res[0] // patch_size)
     attn_map = F.interpolate(attn_map, scale_factor=patch_size, mode="bilinear")
     max_idx = attn_map.argmax(dim=1)
 

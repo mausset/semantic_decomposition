@@ -52,7 +52,7 @@ class InterpreterBlock(nn.Module):
     def __init__(
         self,
         config: dict,
-        n_decode: int,
+        n_decode: int | tuple[int, int],
     ):
         super().__init__()
         self.dim = config["dim"]
@@ -60,11 +60,14 @@ class InterpreterBlock(nn.Module):
         self.n_slots = config["n_slots"]
         self.time_shrink = config.get("time_shrink", 1)
 
-        self.decode_res = next(
-            (i, n_decode // i)
-            for i in range(int(n_decode**0.5), 0, -1)
-            if n_decode % i == 0
-        )
+        if isinstance(n_decode, int):
+            self.decode_res = next(
+                (i, n_decode // i)
+                for i in range(int(n_decode**0.5), 0, -1)
+                if n_decode % i == 0
+            )
+        else:  # Tuple
+            self.decode_res = n_decode
         if self.time_shrink > 1:
             self.decode_res = (
                 self.time_shrink,
@@ -162,8 +165,11 @@ class Interpreter(nn.Module):
 
         self.base = TimmWrapper(**base_config).eval().requires_grad_(False)
 
-        base_resolution = base_config["resolution"][0] // self.base.patch_size
-        n_decode = base_resolution**2
+        base_resolution = (
+            base_config["resolution"][0] // self.base.patch_size,
+            base_config["resolution"][1] // self.base.patch_size,
+        )
+        n_decode = base_resolution
         self.blocks = nn.ModuleList([])
         for i in range(len(block_configs)):
             self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
@@ -329,7 +335,7 @@ class InterpreterTrainer(pl.LightningModule):
                 attn_plots = plot_attention_hierarchical(
                     imgs=x,
                     attn_maps=attn_maps,
-                    res=self.resolution[0],
+                    res=self.resolution,
                     patch_size=self.patch_size,
                 )
 
