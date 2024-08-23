@@ -4,7 +4,14 @@ import lightning.pytorch as pl
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
+from torchvision.transforms.v2 import (
+    Compose,
+    Normalize,
+    Resize,
+    ToDtype,
+    ToImage,
+    CenterCrop,
+)
 
 
 class VideoUnpackedDataset(Dataset):
@@ -19,7 +26,8 @@ class VideoUnpackedDataset(Dataset):
         self.sequence_length = sequence_length
         self.transform = Compose(
             [
-                Resize(resolution),
+                Resize(resolution[0]),
+                CenterCrop(resolution),
                 ToImage(),
                 ToDtype(torch.float, scale=True),
                 Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
