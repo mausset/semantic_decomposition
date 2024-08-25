@@ -9,7 +9,7 @@ from models.attention import Attention, DualAttention, AttentionDecode
 from functools import reduce
 
 
-class TransformerDecoder(nn.Module):
+class TransformerDecoderV2(nn.Module):
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class TransformerDecoder(nn.Module):
         return target
 
 
-class TransformerDecoderOld(nn.Module):
+class TransformerDecoderV1(nn.Module):
 
     def __init__(
         self,

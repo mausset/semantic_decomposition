@@ -5,7 +5,7 @@ import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder, TransformerDecoderOld
+from models.decoder import TransformerDecoderV2, TransformerDecoderV1
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
@@ -96,7 +96,7 @@ class InterpreterBlock(nn.Module):
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoder(
+        self.decoder = TransformerDecoderV1(
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
