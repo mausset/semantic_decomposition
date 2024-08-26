@@ -141,6 +141,7 @@ class PSA(pl.LightningModule):
         n_iters=8,
         n_slots=8,
         implicit=True,
+        sampler="gaussian",
         convergence_threshold=0.1,
         vis_post_weight_attn=False,
         eps=1e-8,
@@ -157,7 +158,10 @@ class PSA(pl.LightningModule):
 
         self.scale = input_dim**-0.5
 
-        self.sampler = GaussianPrior(slot_dim)
+        if sampler == "gaussian":
+            self.sampler = GaussianPrior(slot_dim)
+        elif sampler == "gaussian_dependent":
+            self.sampler = GaussianDependent(slot_dim)
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
