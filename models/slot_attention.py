@@ -160,8 +160,8 @@ class PSA(pl.LightningModule):
 
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
-        elif sampler == "gaussian_dependent":
-            self.sampler = GaussianDependent(slot_dim)
+        elif sampler == "embedding":
+            self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
