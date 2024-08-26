@@ -6,7 +6,7 @@ import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoderV2, TransformerDecoderV1
-from models.slot_attention import SA, PSA2, PSA3
+from models.slot_attention import SA, PSA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
@@ -76,12 +76,12 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.slot_attention = PSA3(
+        self.slot_attention = PSA(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
-            relative_error=config.get("relative_error", 0.1),
-            n_iters=8,
+            convergence_threshold=config.get("convergence_threshold", 0.1),
+            n_iters=config.get("n_iters", 8),
         )
 
         if "enc_depth" in config:
