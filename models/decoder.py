@@ -9,7 +9,7 @@ from models.attention import Attention, DualAttention, AttentionDecode
 from functools import reduce
 
 
-class TransformerDecoder(nn.Module):
+class TransformerDecoderV2(nn.Module):
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class TransformerDecoder(nn.Module):
         return target
 
 
-class TransformerDecoderOld(nn.Module):
+class TransformerDecoderV1(nn.Module):
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class TransformerDecoderOld(nn.Module):
             # ff_swish=True,
         )
 
-    def forward(self, x):
+    def forward(self, x, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -99,6 +99,6 @@ class TransformerDecoderOld(nn.Module):
         # target = self.pe(x, resolution)
         target = repeat(self.pos_embedding, "1 n d -> (b 1) n d", b=x.shape[0])
 
-        target = self.transformer(target, context=x)
+        target = self.transformer(target, context=x, context_mask=context_mask)
 
         return target

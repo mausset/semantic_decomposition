@@ -5,17 +5,15 @@ import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder, TransformerDecoderOld
-from models.slot_attention import SA
+from models.decoder import TransformerDecoderV2, TransformerDecoderV1
+from models.slot_attention import SA, PSA2, PSA3
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.schedulers import WarmupCosineSchedule
 from utils.plot import (
-    plot_attention_interpreter_hierarchical,
     plot_attention_hierarchical,
-    plot_attention_simple,
 )
 from x_transformers import Encoder
 
@@ -78,11 +76,11 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.slot_attention = SA(
+        self.slot_attention = PSA3(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
-            sampler=config.get("sampler", "gaussian"),
+            relative_error=config.get("relative_error", 0.1),
             n_iters=8,
         )
 
@@ -96,7 +94,7 @@ class InterpreterBlock(nn.Module):
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoder(
+        self.decoder = TransformerDecoderV1(
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
@@ -135,16 +133,16 @@ class InterpreterBlock(nn.Module):
         if self.encoder is not None:
             x = self.encoder(x)
 
-        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
+        slots, attn_map, slot_mask = self.slot_attention(x)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
-        return slots, attn_map
+        return slots, attn_map, slot_mask
 
-    def decode(self, x):
+    def decode(self, x, context_mask=None):
         b, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.decoder(x)
+        x = self.decoder(x, context_mask=context_mask)
         x = rearrange(
             x,
             "(b t) (s n) d -> b (t s) n d",  # Ablate this
@@ -189,14 +187,14 @@ class Interpreter(nn.Module):
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
             for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map = block(x)
+                x, attn_map, _ = block(x)
                 attn_maps.append(attn_map)
                 x = x.detach()
 
         features = [x]
-        x, attn_map = self.blocks[-1](x)
+        x, attn_map, slot_mask = self.blocks[-1](x)
         attn_maps.append(attn_map)
-        decoded = [self.blocks[-1].decode(x)]
+        decoded = [self.blocks[-1].decode(x, context_mask=slot_mask)]
 
         return decoded, features, attn_maps
 
@@ -216,10 +214,10 @@ class Interpreter(nn.Module):
         features = [x]
         decoded = []
         for block in blocks:  # type: ignore
-            x, attn_map = block(x)
+            x, attn_map, slot_mask = block(x)
             features.append(x)
             attn_maps.append(attn_map)
-            decoded.append(block.decode(x))
+            decoded.append(block.decode(x, context_mask=slot_mask))
             x = x.detach()
 
         return decoded, features, attn_maps
