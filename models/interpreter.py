@@ -1,21 +1,28 @@
 import lightning as pl
-
 import timm
 import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoderV2, TransformerDecoderV1
-from models.slot_attention import SA, PSA
+from models.decoder import TransformerDecoderV1, TransformerDecoderV2
+from models.slot_attention import ESA, PSA, SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
-from utils.schedulers import WarmupCosineSchedule
 from utils.plot import (
     plot_attention_hierarchical,
 )
+from utils.schedulers import LinearSchedule, WarmupCosineSchedule
 from x_transformers import Encoder
+
+from io import BytesIO
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
 
 
 class TimmWrapper(nn.Module):
@@ -76,7 +83,7 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.slot_attention = PSA(
+        self.slot_attention = ESA(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
@@ -214,14 +221,16 @@ class Interpreter(nn.Module):
         attn_maps = []
         features = [x]
         decoded = []
+        slot_masks = []
         for block in blocks:  # type: ignore
             x, attn_map, slot_mask = block(x)
             features.append(x)
             attn_maps.append(attn_map)
+            slot_masks.append(slot_mask)
             decoded.append(block.decode(x, context_mask=slot_mask))
             x = x.detach()
 
-        return decoded, features, attn_maps
+        return decoded, features, attn_maps, slot_masks
 
 
 class InterpreterTrainer(pl.LightningModule):
@@ -271,6 +280,8 @@ class InterpreterTrainer(pl.LightningModule):
 
         self.gif = None
 
+        self.slot_counts = torch.zeros(17).to("cuda")
+
     @property
     def current_block(self):
         if self.layer_schedule is None:
@@ -290,7 +301,7 @@ class InterpreterTrainer(pl.LightningModule):
         if self.only_last:
             decoded, target, attn_maps = self.model.train_only_last(x)
         else:
-            decoded, target, attn_maps = self.model.forward(x, current_block=self.current_block)  # type: ignore
+            decoded, target, attn_maps, slot_masks = self.model.forward(x, current_block=self.current_block)  # type: ignore
 
         loss = 0
         start = len(self.model.blocks) - 1 if self.only_last else 0
@@ -301,6 +312,8 @@ class InterpreterTrainer(pl.LightningModule):
 
             self.metric_loggers[f"loss_{i}"](local_loss.detach())
             loss += local_loss
+
+        self.slot_counts += torch.bincount(slot_masks[-1].sum(-1), minlength=17).detach()  # type: ignore
 
         return loss, attn_maps
 
@@ -321,6 +334,28 @@ class InterpreterTrainer(pl.LightningModule):
     def on_train_epoch_end(self):
         if self.gif is not None:
             self.gif = None
+
+        plt.figure(figsize=(10, 6))
+        sns.barplot(x=list(range(17)), y=self.slot_counts.cpu().numpy())
+        plt.xlabel("# Slots")
+        plt.ylabel("Count")
+        plt.tight_layout()
+
+        buf = BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+
+        img = Image.open(buf)
+
+        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger):  # type: ignore
+            self.logger.experiment.log(  # type: ignore
+                {
+                    "slot_counts": wandb.Image(img),
+                }
+            )
+
+        self.slot_counts = torch.zeros(17, device="cuda")
+        plt.close()
 
     def training_step(self, x, batch_idx: int):  # type: ignore
         # if training with images
@@ -364,6 +399,9 @@ class InterpreterTrainer(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
+        self.model.blocks[-1].slot_attention.convergence_threshold = (
+            self.trace_scheduler(self.global_step)
+        )
 
     def configure_optimizers(self):  # type: ignore
         optimizer = AdamW(
@@ -371,6 +409,12 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
+
+        self.trace_scheduler = LinearSchedule(
+            start=self.optimizer_config["trace_start_threshold"],
+            end=self.optimizer_config["trace_end_threshold"],
+            duration=self.optimizer_config["trace_epochs"] * steps_per_epoch,
+        )
 
         scheduler = WarmupCosineSchedule(
             optimizer,

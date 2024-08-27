@@ -13,6 +13,10 @@ class LinearSchedule(object):
         self.duration = duration
 
     def __call__(self, t):
+        if self.start > self.end:
+            return max(
+                self.start + (self.end - self.start) * t / self.duration, self.end
+            )
         return min(self.start + (self.end - self.start) * t / self.duration, self.end)
 
 
