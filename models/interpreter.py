@@ -5,7 +5,7 @@ import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoderV1, TransformerDecoderV2
-from models.slot_attention import ESA, PSA, SA
+from models.slot_attention import TSA, PSA, SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
@@ -14,6 +14,7 @@ from utils.plot import (
     plot_attention_hierarchical,
 )
 from utils.schedulers import LinearSchedule, WarmupCosineSchedule
+from utils.losses import EntropyLoss
 from x_transformers import Encoder
 
 from io import BytesIO
@@ -83,12 +84,12 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.slot_attention = ESA(
+        self.slot_attention = SA(
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
             sampler=config.get("sampler", "gaussian"),
-            convergence_threshold=config.get("convergence_threshold", 0.1),
+            # convergence_threshold=config.get("convergence_threshold", 0.1),
             n_iters=config.get("n_iters", 8),
         )
 
@@ -141,10 +142,10 @@ class InterpreterBlock(nn.Module):
         if self.encoder is not None:
             x = self.encoder(x)
 
-        slots, attn_map, slot_mask = self.slot_attention(x)
-        slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
+        ret = self.slot_attention(x)
+        ret["slots"] = rearrange(ret["slots"], "(b t) ... -> b t ...", b=b)
 
-        return slots, attn_map, slot_mask
+        return ret
 
     def decode(self, x, context_mask=None):
         b, *_ = x.shape
@@ -190,21 +191,25 @@ class Interpreter(nn.Module):
         b = x.shape[0]
 
         attn_maps = []
+        slot_masks = []
         with torch.no_grad():
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
             for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map, _ = block(x)
-                attn_maps.append(attn_map)
-                x = x.detach()
+                ret = block(x)
+                attn_maps.append(ret["attn_map"])
+                slot_masks.append(ret.get("mask"))
+                x = ret["slots"].detach()
 
         features = [x]
-        x, attn_map, slot_mask = self.blocks[-1](x)
-        attn_maps.append(attn_map)
-        decoded = [self.blocks[-1].decode(x, context_mask=slot_mask)]
+        ret = self.blocks[-1](x)
 
-        return decoded, features, attn_maps
+        attn_maps.append(ret["attn_map"])
+        slot_masks.append(ret.get("mask"))
+        decoded = [self.blocks[-1].decode(x, context_mask=ret.get("mask"))]
+
+        return decoded, features, attn_maps, slot_masks
 
     def forward(self, x, current_block=None):
         b = x.shape[0]
@@ -223,12 +228,12 @@ class Interpreter(nn.Module):
         decoded = []
         slot_masks = []
         for block in blocks:  # type: ignore
-            x, attn_map, slot_mask = block(x)
-            features.append(x)
-            attn_maps.append(attn_map)
-            slot_masks.append(slot_mask)
-            decoded.append(block.decode(x, context_mask=slot_mask))
-            x = x.detach()
+            ret = block(x)
+            features.append(ret["slots"])
+            attn_maps.append(ret["attn_map"])
+            slot_masks.append(ret.get("mask"))
+            decoded.append(block.decode(features[-1], context_mask=ret.get("mask")))
+            x = ret["slots"].detach()
 
         return decoded, features, attn_maps, slot_masks
 
@@ -244,6 +249,7 @@ class InterpreterTrainer(pl.LightningModule):
         layer_schedule: dict | None = {},
         only_last: bool = False,
         loss: str = "sinkhorn",
+        entropy_lambda: float = 0.0,
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -274,9 +280,14 @@ class InterpreterTrainer(pl.LightningModule):
         else:
             raise ValueError(f"Unknown loss: {loss}")
 
+        self.entropy_lambda = entropy_lambda
+        self.entropy_loss = EntropyLoss()
+
         self.metric_loggers = nn.ModuleDict(
             {f"loss_{i}": MeanMetric() for i in range(self.n_blocks)}
         )
+        for i in range(self.n_blocks):
+            self.metric_loggers[f"entropy_{i}"] = MeanMetric()
 
         self.gif = None
 
@@ -299,21 +310,28 @@ class InterpreterTrainer(pl.LightningModule):
     def forward(self, x, stage="train"):
 
         if self.only_last:
-            decoded, target, attn_maps = self.model.train_only_last(x)
+            decoded, target, attn_maps, slot_masks = self.model.train_only_last(x)
         else:
             decoded, target, attn_maps, slot_masks = self.model.forward(x, current_block=self.current_block)  # type: ignore
 
         loss = 0
         start = len(self.model.blocks) - 1 if self.only_last else 0
-        for i, (d, t) in enumerate(zip(decoded, target), start=start):
+        for i, (d, t, a) in enumerate(zip(decoded, target, attn_maps), start=start):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
             local_loss = self.loss_fn(d, t.detach()).mean()
 
+            if self.entropy_lambda > 0:
+                entropy = self.entropy_loss(a).mean()
+
+                self.metric_loggers[f"entropy_{i}"](entropy.detach())
+                local_loss += self.entropy_lambda * entropy
+
             self.metric_loggers[f"loss_{i}"](local_loss.detach())
             loss += local_loss
 
-        self.slot_counts += torch.bincount(slot_masks[-1].sum(-1), minlength=17).detach()  # type: ignore
+        if any(v is not None for v in slot_masks):
+            self.slot_counts += torch.bincount(slot_masks[-1].sum(-1), minlength=17).detach()  # type: ignore
 
         return loss, attn_maps
 
@@ -335,19 +353,18 @@ class InterpreterTrainer(pl.LightningModule):
         if self.gif is not None:
             self.gif = None
 
-        plt.figure(figsize=(10, 6))
-        sns.barplot(x=list(range(17)), y=self.slot_counts.cpu().numpy())
-        plt.xlabel("# Slots")
-        plt.ylabel("Count")
-        plt.tight_layout()
+        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger) and self.slot_counts.sum() > 0:  # type: ignore
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=list(range(17)), y=self.slot_counts.cpu().numpy())
+            plt.xlabel("# Slots")
+            plt.ylabel("Count")
+            plt.tight_layout()
 
-        buf = BytesIO()
-        plt.savefig(buf, format="png")
-        buf.seek(0)
+            buf = BytesIO()
+            plt.savefig(buf, format="png")
+            buf.seek(0)
 
-        img = Image.open(buf)
-
-        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger):  # type: ignore
+            img = Image.open(buf)
             self.logger.experiment.log(  # type: ignore
                 {
                     "slot_counts": wandb.Image(img),
@@ -399,9 +416,10 @@ class InterpreterTrainer(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        self.model.blocks[-1].slot_attention.convergence_threshold = (
-            self.trace_scheduler(self.global_step)
-        )
+        if hasattr(self, "trace_scheduler"):
+            self.model.blocks[-1].slot_attention.convergence_threshold = (
+                self.trace_scheduler(self.global_step)
+            )
 
     def configure_optimizers(self):  # type: ignore
         optimizer = AdamW(
@@ -410,11 +428,12 @@ class InterpreterTrainer(pl.LightningModule):
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
 
-        self.trace_scheduler = LinearSchedule(
-            start=self.optimizer_config["trace_start_threshold"],
-            end=self.optimizer_config["trace_end_threshold"],
-            duration=self.optimizer_config["trace_epochs"] * steps_per_epoch,
-        )
+        if "trace_epochs" in self.optimizer_config:
+            self.trace_scheduler = LinearSchedule(
+                start=self.optimizer_config["trace_start_threshold"],
+                end=self.optimizer_config["trace_end_threshold"],
+                duration=self.optimizer_config["trace_epochs"] * steps_per_epoch,
+            )
 
         scheduler = WarmupCosineSchedule(
             optimizer,

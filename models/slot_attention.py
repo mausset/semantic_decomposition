@@ -124,8 +124,9 @@ class SA(pl.LightningModule):
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
 
-        for _ in range(self.n_iters):
-            slots = self.step(slots, k, v, mask=mask)
+        with torch.no_grad():
+            for _ in range(self.n_iters):
+                slots = self.step(slots, k, v, mask=mask)
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
@@ -134,7 +135,8 @@ class SA(pl.LightningModule):
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
-        return slots, attn_map
+        ret = {"slots": slots, "attn_map": attn_map}
+        return ret
 
 
 class PSA(pl.LightningModule):
@@ -307,10 +309,12 @@ class PSA(pl.LightningModule):
         slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
-        return slots, attn_map, mask
+        ret = {"slots": slots, "attn_map": attn_map, "mask": mask}
+
+        return ret
 
 
-class ESA(pl.LightningModule):
+class TSA(pl.LightningModule):
 
     def __init__(
         self,
@@ -488,4 +492,5 @@ class ESA(pl.LightningModule):
         slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
-        return slots, attn_map, mask
+        ret = {"slots": slots, "attn_map": attn_map, "mask": mask}
+        return ret
