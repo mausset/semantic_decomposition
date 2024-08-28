@@ -427,7 +427,7 @@ class ESA(pl.LightningModule):
 
         trace = torch.vmap(torch.trace)(s_to_s) / mask.sum(dim=-1)
         trace = rearrange(trace, "(b n) -> b n", b=b)
-        trace = 1 - trace
+        trace = (1 - trace) / torch.sqrt(mask.sum(dim=-1))
 
         idx = torch.tensor(
             [torch.where(row < self.convergence_threshold)[0][-1] for row in trace],
