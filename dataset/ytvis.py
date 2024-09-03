@@ -100,16 +100,12 @@ class YTVIS(Dataset):
     def __len__(self):
         return sum(
             [
-                max(len(video) - self.sequence_length, 1)
+                max(len(video) - self.sequence_length + 1, 1)
                 for video in self.video_sequences
             ]
         )
 
-    def remove_border(
-        self,
-        img,
-        bbox=None,
-    ):
+    def remove_border(self, img, bbox=None):
         if bbox is None:
             bbox = img.getbbox()
         return img.crop(bbox), bbox
@@ -119,9 +115,11 @@ class YTVIS(Dataset):
 
         video_idx = 0
         while idx >= max(
-            (len(self.video_sequences[video_idx]) - self.sequence_length), 1
+            len(self.video_sequences[video_idx]) - self.sequence_length + 1, 1
         ):
-            idx -= max(len(self.video_sequences[video_idx]) - self.sequence_length, 1)
+            idx -= max(
+                len(self.video_sequences[video_idx]) - self.sequence_length + 1, 1
+            )
             video_idx += 1
         return video_idx, idx
 
@@ -177,13 +175,12 @@ class YTVISDataset(pl.LightningDataModule):
     def setup(self, stage=None):  # type: ignore
 
         self.train_dataset = YTVIS(**self.dataset_config, split="train")
-        self.val_dataset = YTVIS(**self.dataset_config, split="val")
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, **self.loader_config, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, **self.loader_config, shuffle=False)
+        raise NotImplementedError
 
     def test_dataloader(self):
         raise NotImplementedError

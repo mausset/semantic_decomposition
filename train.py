@@ -6,6 +6,7 @@ import os
 import warnings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
+warnings.simplefilter(action="ignore", category=UserWarning)
 
 
 class MySaveConfigCallback(SaveConfigCallback):

@@ -305,6 +305,7 @@ class InterpreterTrainer(pl.LightningModule):
         return current
 
     def update_slot_counts(self, attn):
+        attn = rearrange(attn, "b t ... -> (b t) ...")
         max_idx = attn.argmax(dim=-1)
         active = [len(set(row.tolist())) for row in max_idx]
         self.slot_counts += torch.bincount(
@@ -332,7 +333,7 @@ class InterpreterTrainer(pl.LightningModule):
                 t = t[mask]
 
             local_loss = self.loss_fn(d, t.detach()).mean()
-            self.metric_loggers[f"loss_{i}"](local_loss.detach())
+            self.metric_loggers[f"loss_{i}"].update(local_loss.detach())
 
             self.update_slot_counts(a)
             print(self.slot_counts / self.slot_counts.sum().tolist())
