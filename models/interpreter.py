@@ -1,29 +1,26 @@
+from io import BytesIO
+
 import lightning as pl
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
 import timm
 import torch
 import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoderV1, TransformerDecoderV2
-from models.slot_attention import TSA, PSA, SA
+from models.decoder import TransformerDecoderV1
+from models.slot_attention import SA
+from PIL import Image
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
-from utils.plot import (
-    plot_attention_hierarchical,
-)
+from utils.plot import plot_attention_hierarchical
 from utils.schedulers import LinearSchedule, WarmupCosineSchedule
-from utils.losses import EntropyLoss
 from x_transformers import Encoder
 
-from io import BytesIO
-import matplotlib
-
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import seaborn as sns
-from PIL import Image
 
 
 class TimmWrapper(nn.Module):
@@ -88,9 +85,7 @@ class InterpreterBlock(nn.Module):
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
-            sampler=config.get("sampler", "gaussian"),
-            # convergence_threshold=config.get("convergence_threshold", 0.1),
-            n_iters=config.get("n_iters", 8),
+            **config.get("sa_kwargs", {}),
         )
 
         if "enc_depth" in config:
@@ -134,16 +129,25 @@ class InterpreterBlock(nn.Module):
 
         return x
 
-    def forward(self, x):
-        b, *_ = x.shape
+    def forward(self, x, seq_mask=None):
+        b, t, n, _ = x.shape
+
+        assert t % self.time_shrink == 0, "Time shrink must divide sequence length"
+
+        mask = None
+        if seq_mask is not None:
+            mask = repeat(seq_mask, "b t -> b t n", n=n)
+            mask = self.shrink_time(mask)
+            mask = rearrange(mask, "b t n -> (b t) n")
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
         if self.encoder is not None:
-            x = self.encoder(x)
+            x = self.encoder(x, mask=mask)
 
-        ret = self.slot_attention(x)
+        ret = self.slot_attention(x, context_mask=mask)
         ret["slots"] = rearrange(ret["slots"], "(b t) ... -> b t ...", b=b)
+        ret["attn_map"] = rearrange(ret["attn_map"], "(b t) ... -> b t ...", b=b)
 
         return ret
 
@@ -154,7 +158,7 @@ class InterpreterBlock(nn.Module):
         x = self.decoder(x, context_mask=context_mask)
         x = rearrange(
             x,
-            "(b t) (s n) d -> b (t s) n d",  # Ablate this
+            "(b t) (s n) d -> b (t s) n d",
             b=b,
             s=self.time_shrink,
         )
@@ -187,31 +191,31 @@ class Interpreter(nn.Module):
         for block in self.blocks[:-1]:  # type: ignore
             block.eval().requires_grad_(False)
 
-    def train_only_last(self, x):
+    def train_only_last(self, x, seq_mask=None):
         b = x.shape[0]
 
         attn_maps = []
-        slot_masks = []
+        extras = []
         with torch.no_grad():
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
             for block in self.blocks[:-1]:  # type: ignore
-                ret = block(x)
+                ret = block(x, seq_mask=seq_mask)
                 attn_maps.append(ret["attn_map"])
-                slot_masks.append(ret.get("mask"))
+                extras.append(ret)
                 x = ret["slots"].detach()
 
         features = [x]
-        ret = self.blocks[-1](x)
+        ret = self.blocks[-1](x, seq_mask=seq_mask)
 
         attn_maps.append(ret["attn_map"])
-        slot_masks.append(ret.get("mask"))
+        extras.append(ret)
         decoded = [self.blocks[-1].decode(x, context_mask=ret.get("mask"))]
 
-        return decoded, features, attn_maps, slot_masks
+        return decoded, features, attn_maps, extras
 
-    def forward(self, x, current_block=None):
+    def forward(self, x, seq_mask=None, current_block=None):
         b = x.shape[0]
 
         with torch.no_grad():
@@ -226,16 +230,16 @@ class Interpreter(nn.Module):
         attn_maps = []
         features = [x]
         decoded = []
-        slot_masks = []
+        extras = []
         for block in blocks:  # type: ignore
-            ret = block(x)
+            ret = block(x, seq_mask=seq_mask)
             features.append(ret["slots"])
             attn_maps.append(ret["attn_map"])
-            slot_masks.append(ret.get("mask"))
+            extras.append(ret)
             decoded.append(block.decode(features[-1], context_mask=ret.get("mask")))
             x = ret["slots"].detach()
 
-        return decoded, features, attn_maps, slot_masks
+        return decoded, features, attn_maps, extras
 
 
 class InterpreterTrainer(pl.LightningModule):
@@ -249,7 +253,6 @@ class InterpreterTrainer(pl.LightningModule):
         layer_schedule: dict | None = {},
         only_last: bool = False,
         loss: str = "sinkhorn",
-        entropy_lambda: float = 0.0,
         checkpoint_path: str | None = None,
     ):
         super().__init__()
@@ -280,17 +283,11 @@ class InterpreterTrainer(pl.LightningModule):
         else:
             raise ValueError(f"Unknown loss: {loss}")
 
-        self.entropy_lambda = entropy_lambda
-        self.entropy_loss = EntropyLoss()
-
         self.metric_loggers = nn.ModuleDict(
             {f"loss_{i}": MeanMetric() for i in range(self.n_blocks)}
         )
-        for i in range(self.n_blocks):
-            self.metric_loggers[f"entropy_{i}"] = MeanMetric()
 
         self.gif = None
-
         self.slot_counts = torch.zeros(17).to("cuda")
 
     @property
@@ -307,31 +304,40 @@ class InterpreterTrainer(pl.LightningModule):
 
         return current
 
-    def forward(self, x, stage="train"):
+    def update_slot_counts(self, attn):
+        max_idx = attn.argmax(dim=-1)
+        active = [len(set(row.tolist())) for row in max_idx]
+        self.slot_counts += torch.bincount(
+            torch.tensor(active, device="cuda"), minlength=17
+        ).detach()
+
+    def forward(self, x, seq_mask=None, stage="train"):
 
         if self.only_last:
-            decoded, target, attn_maps, slot_masks = self.model.train_only_last(x)
+            decoded, target, attn_maps, extras = self.model.train_only_last(x)
         else:
-            decoded, target, attn_maps, slot_masks = self.model.forward(x, current_block=self.current_block)  # type: ignore
+            decoded, target, attn_maps, extras = self.model.forward(x, seq_mask=seq_mask, current_block=self.current_block)  # type: ignore
 
         loss = 0
         start = len(self.model.blocks) - 1 if self.only_last else 0
-        for i, (d, t, a) in enumerate(zip(decoded, target, attn_maps), start=start):
+        for i, (d, t, a, _) in enumerate(
+            zip(decoded, target, attn_maps, extras), start=start
+        ):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
+
+            if seq_mask is not None:
+                mask = rearrange(seq_mask, "b t -> (b t)")
+                d = d[mask]
+                t = t[mask]
+
             local_loss = self.loss_fn(d, t.detach()).mean()
-
-            if self.entropy_lambda > 0:
-                entropy = self.entropy_loss(a).mean()
-
-                self.metric_loggers[f"entropy_{i}"](entropy.detach())
-                local_loss += self.entropy_lambda * entropy
-
             self.metric_loggers[f"loss_{i}"](local_loss.detach())
-            loss += local_loss
 
-        if any(v is not None for v in slot_masks):
-            self.slot_counts += torch.bincount(slot_masks[-1].sum(-1), minlength=17).detach()  # type: ignore
+            self.update_slot_counts(a)
+            print(self.slot_counts / self.slot_counts.sum().tolist())
+
+            loss += local_loss
 
         return loss, attn_maps
 
@@ -355,7 +361,14 @@ class InterpreterTrainer(pl.LightningModule):
 
         if isinstance(self.logger, pl.pytorch.loggers.WandbLogger) and self.slot_counts.sum() > 0:  # type: ignore
             plt.figure(figsize=(10, 6))
-            sns.barplot(x=list(range(17)), y=self.slot_counts.cpu().numpy())
+            self.slot_counts = self.slot_counts / self.slot_counts.sum()
+            sns.barplot(
+                x=list(range(17)),
+                y=self.slot_counts.cpu().numpy(),
+            )
+            plt.yscale("log")
+            plt.ylim(1e-4, 1)
+
             plt.xlabel("# Slots")
             plt.ylabel("Count")
             plt.tight_layout()
@@ -376,10 +389,11 @@ class InterpreterTrainer(pl.LightningModule):
 
     def training_step(self, x, batch_idx: int):  # type: ignore
         # if training with images
-        if len(x.shape) == 4:
-            x = rearrange(x, "b c h w -> b 1 c h w")
 
-        loss, attn_maps = self.forward(x)
+        seq_mask = x["sequence_mask"]
+        x = x["frames"]
+
+        loss, attn_maps = self.forward(x, seq_mask)
 
         if batch_idx % self.trainer.accumulate_grad_batches == 0:
             self.log_metrics()
@@ -406,7 +420,6 @@ class InterpreterTrainer(pl.LightningModule):
                 )
             self.logger.experiment.log(log_dict)  # type: ignore
 
-            # self.logger.experiment.log(log_dict)  # type: ignore
             self.gif = log_dict
 
         return loss
@@ -416,10 +429,6 @@ class InterpreterTrainer(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        if hasattr(self, "trace_scheduler"):
-            self.model.blocks[-1].slot_attention.convergence_threshold = (
-                self.trace_scheduler(self.global_step)
-            )
 
     def configure_optimizers(self):  # type: ignore
         optimizer = AdamW(
@@ -427,13 +436,6 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
-
-        if "trace_epochs" in self.optimizer_config:
-            self.trace_scheduler = LinearSchedule(
-                start=self.optimizer_config["trace_start_threshold"],
-                end=self.optimizer_config["trace_end_threshold"],
-                duration=self.optimizer_config["trace_epochs"] * steps_per_epoch,
-            )
 
         scheduler = WarmupCosineSchedule(
             optimizer,

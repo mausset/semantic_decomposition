@@ -7,12 +7,14 @@ from torch.optim.lr_scheduler import LRScheduler
 
 class LinearSchedule(object):
 
-    def __init__(self, start, end, duration):
+    def __init__(self, start, end, duration, start_step=0):
         self.start = start
         self.end = end
         self.duration = duration
+        self.start_step = start_step
 
     def __call__(self, t):
+        t = max(t - self.start_step, 0)
         if self.start > self.end:
             return max(
                 self.start + (self.end - self.start) * t / self.duration, self.end
