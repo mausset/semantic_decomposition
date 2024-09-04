@@ -404,6 +404,7 @@ class InterpreterTrainer(pl.LightningModule):
             and self.trainer.is_global_zero
             and self.gif is None
         ):
+            attn_maps = [rearrange(a, "b t ... -> (b t) ...") for a in attn_maps]
             with torch.no_grad():
                 attn_plots = plot_attention_hierarchical(
                     imgs=x,
