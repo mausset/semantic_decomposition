@@ -1,5 +1,6 @@
-import lightning as pl
+from pathlib import Path
 
+import lightning as pl
 
 from nvidia.dali.plugin.base_iterator import LastBatchPolicy
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
@@ -13,23 +14,24 @@ initial_prefetch_size = 8
 
 @pipeline_def  # type: ignore
 def video_pipe(
-    file_root="",
     filenames=[],
+    labels=[],
     resolution=(224, 224),
     sequence_length=16,
-    stride=6,
+    stride=1,
     step=1,
     shuffle=True,
     shard_id=0,
     num_shards=1,
 ):
-    print(f"file_root: {file_root}")
-    videos = fn.readers.video_resize(
+    videos, labels, timestamps = fn.readers.video_resize(  # type: ignore
         device="gpu",
-        file_root=file_root,
         filenames=filenames,
+        labels=labels,
         resize_shorter=resolution[0],
         sequence_length=sequence_length,
+        enable_timestamps=True,
+        pad_sequences=True,
         shard_id=shard_id,
         stride=stride,
         step=step,
@@ -40,11 +42,10 @@ def video_pipe(
         prefetch_queue_depth=1,
         file_list_include_preceding_frame=True,
     )
-    if isinstance(videos, list):
-        videos = videos[0]
+
+    sequence_mask = timestamps >= 0
 
     coin = fn.random.coin_flip(probability=0.5)
-
     mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
     std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
     videos = fn.crop_mirror_normalize(  # type: ignore
@@ -57,7 +58,7 @@ def video_pipe(
         mirror=coin,
     )
 
-    return videos
+    return videos, labels, sequence_mask
 
 
 class LightningWrapper(DALIGenericIterator):
@@ -66,7 +67,7 @@ class LightningWrapper(DALIGenericIterator):
 
     def __next__(self):  # type: ignore
         out = super().__next__()
-        return out[0]["data"]
+        return out[0]
 
 
 class VideoDataset(pl.LightningDataModule):
@@ -75,6 +76,22 @@ class VideoDataset(pl.LightningDataModule):
         super().__init__()
 
         self.pipeline_config = pipeline_config
+        root = Path(pipeline_config["root"])
+        del pipeline_config["root"]
+
+        train_dir = root / "train"
+        self.train_files = list(train_dir.glob("**/*.mp4"))
+        self.train_labels = [
+            int(str(f.parent).split("/")[-1]) for f in self.train_files
+        ]
+
+        val_dir = root / "validation"
+        self.val_files = list(val_dir.glob("**/*.mp4"))
+        self.val_labels = [int(str(f.parent).split("/")[-1]) for f in self.val_files]
+
+        test_dir = root / "test"
+        self.test_files = list(test_dir.glob("**/*.mp4"))
+        self.test_labels = [int(str(f.parent).split("/")[-1]) for f in self.test_files]
 
     def setup(self, stage=None):  # type: ignore
         print("Setting up video dataset...")
@@ -84,6 +101,8 @@ class VideoDataset(pl.LightningDataModule):
 
         pipeline_train = video_pipe(
             **self.pipeline_config,
+            filenames=self.train_files,
+            labels=self.train_labels,
             device_id=device_id,
             shard_id=shard_id,
             num_shards=num_shards,
@@ -91,7 +110,37 @@ class VideoDataset(pl.LightningDataModule):
         self.train_loader = LightningWrapper(
             pipeline_train,
             reader_name="Reader",
-            output_map=["data"],
+            output_map=["frames", "labels", "sequence_mask"],
+            last_batch_policy=LastBatchPolicy.DROP,
+        )
+
+        pipeline_val = video_pipe(
+            **self.pipeline_config,
+            filenames=self.val_files,
+            labels=self.val_labels,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+        )
+        self.val_loader = LightningWrapper(
+            pipeline_val,
+            reader_name="Reader",
+            output_map=["frames", "labels", "sequence_mask"],
+            last_batch_policy=LastBatchPolicy.DROP,
+        )
+
+        pipeline_test = video_pipe(
+            **self.pipeline_config,
+            filenames=self.test_files,
+            labels=self.test_labels,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+        )
+        self.test_loader = LightningWrapper(
+            pipeline_test,
+            reader_name="Reader",
+            output_map=["frames", "labels", "sequence_mask"],
             last_batch_policy=LastBatchPolicy.DROP,
         )
 
@@ -101,7 +150,7 @@ class VideoDataset(pl.LightningDataModule):
         return self.train_loader
 
     def val_dataloader(self):
-        return None
+        return self.val_loader
 
     def test_dataloader(self):
-        raise NotImplementedError
+        return self.test_loader
