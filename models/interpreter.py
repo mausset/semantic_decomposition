@@ -335,8 +335,9 @@ class InterpreterTrainer(pl.LightningModule):
             local_loss = self.loss_fn(d, t.detach()).mean()
             self.metric_loggers[f"loss_{i}"].update(local_loss.detach())
 
-            self.update_slot_counts(a)
-            print(self.slot_counts / self.slot_counts.sum().tolist())
+            if self.trainer.is_global_zero:
+                self.update_slot_counts(a)
+                print(self.slot_counts / self.slot_counts.sum().tolist())
 
             loss += local_loss
 
@@ -360,7 +361,11 @@ class InterpreterTrainer(pl.LightningModule):
         if self.gif is not None:
             self.gif = None
 
-        if isinstance(self.logger, pl.pytorch.loggers.WandbLogger) and self.slot_counts.sum() > 0:  # type: ignore
+        if (
+            self.trainer.is_global_zero
+            and isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
+            and self.slot_counts.sum() > 0
+        ):
             plt.figure(figsize=(10, 6))
             self.slot_counts = self.slot_counts / self.slot_counts.sum()
             sns.barplot(
