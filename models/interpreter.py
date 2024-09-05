@@ -211,7 +211,7 @@ class Interpreter(nn.Module):
 
         attn_maps.append(ret["attn_map"])
         extras.append(ret)
-        decoded = [self.blocks[-1].decode(x, context_mask=ret.get("mask"))]
+        decoded = [self.blocks[-1].decode(ret["slots"], context_mask=ret.get("mask"))]
 
         return decoded, features, attn_maps, extras
 
