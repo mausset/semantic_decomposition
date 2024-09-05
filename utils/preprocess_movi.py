@@ -11,7 +11,7 @@ from torchvision import transforms
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--out_path', default='data/movi_e/256x256/processed')
-parser.add_argument('--data_dir', default='data/movi_e/256x256/1.0.0')
+parser.add_argument('--data_dir', default='gs://kubric-public/tfds')
 
 parser.add_argument('--version', default='1.0.0')
 parser.add_argument('--image_size', type=int, default=256)
@@ -21,7 +21,6 @@ args = parser.parse_args()
 ds, ds_info = tfds.load(f"movi_e/{args.image_size}x{args.image_size}:{args.version}",
     data_dir=args.data_dir,
     with_info=True,
-    download=False,
 ) # type: ignore
 
 to_tensor = transforms.ToTensor()
