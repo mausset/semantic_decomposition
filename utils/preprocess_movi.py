@@ -41,8 +41,9 @@ for split in ['train', 'validation', 'test']:
         path_vid_imgs = os.path.join(args.out_path, split, "images", f"{i:08}")
         os.makedirs(path_vid_imgs, exist_ok=True)
 
-        path_vid_masks = os.path.join(args.out_path, split, "masks", f"{i:08}")
-        os.makedirs(path_vid_masks, exist_ok=True)
+        if split != 'train':
+            path_vid_masks = os.path.join(args.out_path, split, "masks", f"{i:08}")
+            os.makedirs(path_vid_masks, exist_ok=True)
 
         for t in range(T):
             img = video[t]
