@@ -7,6 +7,8 @@ import torchvision.utils as vutils
 
 from torchvision import transforms
 
+os.environ['CURL_CA_BUNDLE'] = "/etc/ssl/certs/ca-bundle.crt"
+
 
 parser = argparse.ArgumentParser()
 
