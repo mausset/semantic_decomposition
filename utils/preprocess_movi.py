@@ -20,7 +20,8 @@ args = parser.parse_args()
 
 ds, ds_info = tfds.load(f"movi_e/{args.image_size}x{args.image_size}:{args.version}",
     data_dir=args.data_dir,
-    with_info=True
+    with_info=True,
+    download=False,
 ) # type: ignore
 
 to_tensor = transforms.ToTensor()
