@@ -1,11 +1,13 @@
 import json
 import os
+from random import Random
 
 import lightning.pytorch as pl
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 import torchvision
+from torchvision.io import read_file, decode_jpeg, decode_png
 from torchvision.transforms.v2 import (
     CenterCrop,
     Compose,
@@ -13,8 +15,11 @@ from torchvision.transforms.v2 import (
     Resize,
     ToDtype,
     ToImage,
+    ToTensor,
+    RandomHorizontalFlip,
 )
 
+from time import time
 
 class YTVIS(Dataset):
     def __init__(self, file_root, sequence_length, resolution, split="train"):
@@ -34,9 +39,10 @@ class YTVIS(Dataset):
                 ToImage(),
                 ToDtype(torch.float, scale=True),
                 Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                RandomHorizontalFlip(0.5 if split == "train" else 0),
             ]
         )
-        self.seg_transform = Compose(
+        self.mask_transform = Compose(
             [
                 Resize(
                     resolution[0],
@@ -105,11 +111,6 @@ class YTVIS(Dataset):
             ]
         )
 
-    def remove_border(self, img, bbox=None):
-        if bbox is None:
-            bbox = img.getbbox()
-        return img.crop(bbox), bbox
-
     def idx_to_video(self, idx):
         """Returns the video folder and starting index for a given sequence index"""
 
@@ -131,37 +132,45 @@ class YTVIS(Dataset):
         ]
 
         padding = self.sequence_length - len(frame_paths)
+        pre_pad = torch.randint(0, padding + 1, (1,)).item()
+        post_pad = padding - pre_pad
 
-        frames = [Image.open(frame_path).convert("RGB") for frame_path in frame_paths]
+        frames = torch.stack([decode_jpeg(read_file(frame_path)) for frame_path in frame_paths])
 
-        out_dict = {}
-        frames, bbox = zip(*[self.remove_border(frame) for frame in frames])
-        frames = torch.stack([self.transform(frame) for frame in frames])
-        frames = torch.cat([frames, torch.zeros(padding, *frames.shape[1:])])
-        out_dict["frames"] = frames
+        out = {}
+        frames = self.transform(frames)
 
-        frame_mask = torch.ones(self.sequence_length)
-        if padding > 0:
-            frame_mask[-padding:] = 0
-        out_dict["sequence_mask"] = frame_mask.bool()
+        out["frames"] = torch.cat(
+            [
+                torch.zeros(pre_pad, *frames.shape[1:], device="cpu"), # type: ignore
+                frames, 
+                torch.zeros(post_pad, *frames.shape[1:], device="cpu")
+            ]
+        )
+
+        out["sequence_mask"] = torch.ones(self.sequence_length).bool()
+        if pre_pad > 0:
+            out["sequence_mask"][:pre_pad] = False
+        if post_pad > 0:
+            out["sequence_mask"][-post_pad:] = False
+
 
         if self.split == "val":
-            seg_paths = [
+            mask_paths = [
                 path.replace("JPEGImages", "Annotations").replace("jpg", "png")
                 for path in frame_paths
             ]
-            masks = [Image.open(seg_path) for seg_path in seg_paths]
-            masks, _ = zip(
-                *[self.remove_border(frame, seg) for frame, seg in zip(masks, bbox)]
+            masks = torch.stack([decode_png(read_file(mask_path)) for mask_path in mask_paths])
+            masks = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
+            out["masks"] = torch.cat(
+                [
+                    torch.zeros(pre_pad, *masks.shape[1:], dtype=torch.long), # type: ignore
+                    masks, 
+                    torch.zeros(post_pad, *masks.shape[1:], dtype=torch.long)
+                ]
             )
-            masks = torch.stack([self.seg_transform(seg) for seg in masks]).to(
-                torch.uint8
-            )
-            out_dict["masks"] = torch.cat(
-                [masks, torch.zeros(padding, *masks.shape[1:], dtype=torch.long)]
-            ).squeeze(1)
 
-        return out_dict
+        return out
 
 
 class YTVISDataset(pl.LightningDataModule):

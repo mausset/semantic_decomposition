@@ -10,7 +10,7 @@ import wandb
 from einops import rearrange, repeat
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoderV1
-from models.slot_attention import SA
+from models.slot_attention import SA, TSA
 from PIL import Image
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
@@ -81,12 +81,20 @@ class InterpreterBlock(nn.Module):
 
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
-        self.slot_attention = SA(
-            input_dim=self.dim,
-            slot_dim=self.slot_dim,
-            n_slots=self.n_slots,
-            **config.get("sa_kwargs", {}),
-        )
+        if config.get("sa_arch", "sa") == "sa":
+            self.slot_attention = SA(
+                input_dim=self.dim,
+                slot_dim=self.slot_dim,
+                n_slots=self.n_slots,
+                **config.get("sa_kwargs", {}),
+            )
+        elif config["sa_arch"] == "tsa":
+            self.slot_attention = TSA(
+                input_dim=self.dim,
+                slot_dim=self.slot_dim,
+                n_slots=self.n_slots,
+                **config.get("sa_kwargs", {}),
+            )
 
         if "enc_depth" in config:
             self.encoder = Encoder(
@@ -134,20 +142,19 @@ class InterpreterBlock(nn.Module):
 
         assert t % self.time_shrink == 0, "Time shrink must divide sequence length"
 
-        mask = None
         if seq_mask is not None:
-            mask = repeat(seq_mask, "b t -> b t n", n=n)
-            mask = self.shrink_time(mask)
-            mask = rearrange(mask, "b t n -> (b t) n")
+            seq_mask = repeat(seq_mask, "b t -> b t n", n=n)
+            seq_mask = self.shrink_time(seq_mask)
+            seq_mask = rearrange(seq_mask, "b t n -> (b t) n")
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
         if self.encoder is not None:
-            x = self.encoder(x, mask=mask)
+            x = self.encoder(x, mask=seq_mask)
 
-        ret = self.slot_attention(x, context_mask=mask)
+        ret = self.slot_attention(x, context_mask=seq_mask)
         ret["slots"] = rearrange(ret["slots"], "(b t) ... -> b t ...", b=b)
-        ret["attn_map"] = rearrange(ret["attn_map"], "(b t) ... -> b t ...", b=b)
+        ret["attn"] = rearrange(ret["attn"], "(b t) ... -> b t ...", b=b)
 
         return ret
 
@@ -194,26 +201,24 @@ class Interpreter(nn.Module):
     def train_only_last(self, x, seq_mask=None):
         b = x.shape[0]
 
-        attn_maps = []
-        extras = []
+        out = []
         with torch.no_grad():
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
             for block in self.blocks[:-1]:  # type: ignore
                 ret = block(x, seq_mask=seq_mask)
-                attn_maps.append(ret["attn_map"])
-                extras.append(ret)
-                x = ret["slots"].detach()
+                x = ret["slots"]
+                ret["ignore"] = True
+                out.append(ret)
 
-        features = [x]
         ret = self.blocks[-1](x, seq_mask=seq_mask)
+        ret["target"] = x
+        ret["prediction"] = self.blocks[-1].decode(ret["slots"], context_mask=ret.get("mask"))
 
-        attn_maps.append(ret["attn_map"])
-        extras.append(ret)
-        decoded = [self.blocks[-1].decode(ret["slots"], context_mask=ret.get("mask"))]
+        out.append(ret)
 
-        return decoded, features, attn_maps, extras
+        return out
 
     def forward(self, x, seq_mask=None, current_block=None):
         b = x.shape[0]
@@ -227,19 +232,15 @@ class Interpreter(nn.Module):
         if current_block is not None:
             blocks = blocks[: current_block + 1]
 
-        attn_maps = []
-        features = [x]
-        decoded = []
-        extras = []
+        out = []
         for block in blocks:  # type: ignore
             ret = block(x, seq_mask=seq_mask)
-            features.append(ret["slots"])
-            attn_maps.append(ret["attn_map"])
-            extras.append(ret)
-            decoded.append(block.decode(features[-1], context_mask=ret.get("mask")))
+            ret["target"] = x
+            ret["prediction"] = block.decode(ret["slots"], context_mask=ret.get("mask"))
             x = ret["slots"].detach()
+            out.append(ret)
 
-        return decoded, features, attn_maps, extras
+        return out
 
 
 class InterpreterTrainer(pl.LightningModule):
@@ -288,7 +289,7 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         self.gif = None
-        self.slot_counts = torch.zeros(17).to("cuda")
+        self.slot_counts = torch.zeros(self.model.blocks[-1].n_slots).to("cuda")
 
     @property
     def current_block(self):
@@ -309,39 +310,77 @@ class InterpreterTrainer(pl.LightningModule):
         max_idx = attn.argmax(dim=-1)
         active = [len(set(row.tolist())) for row in max_idx]
         self.slot_counts += torch.bincount(
-            torch.tensor(active, device="cuda"), minlength=17
-        ).detach()
+            torch.tensor(active, device="cuda"), 
+            minlength=self.slot_counts.shape[0]+1,
+        )[1:]
 
     def forward(self, x, seq_mask=None, stage="train"):
 
         if self.only_last:
-            decoded, target, attn_maps, extras = self.model.train_only_last(x)
+            rets = self.model.train_only_last(x, seq_mask=seq_mask)
         else:
-            decoded, target, attn_maps, extras = self.model.forward(x, seq_mask=seq_mask, current_block=self.current_block)  # type: ignore
+            rets = self.model.forward(x, seq_mask=seq_mask, current_block=self.current_block)  # type: ignore
 
         loss = 0
-        start = len(self.model.blocks) - 1 if self.only_last else 0
-        for i, (d, t, a, _) in enumerate(
-            zip(decoded, target, attn_maps, extras), start=start
-        ):
-            d = rearrange(d, "b t ... -> (b t) ...")
-            t = rearrange(t, "b t ... -> (b t) ...")
+        for i, r in enumerate(rets):
+            if "ignore" in r: # type: ignore
+                continue
+            t = rearrange(r["target"], "b t ... -> (b t) ...")
+            p = rearrange(r["prediction"], "b t ... -> (b t) ...")
 
             if seq_mask is not None:
                 mask = rearrange(seq_mask, "b t -> (b t)")
-                d = d[mask]
+                p = p[mask]
                 t = t[mask]
 
-            local_loss = self.loss_fn(d, t.detach()).mean()
+            local_loss = self.loss_fn(p, t.detach()).mean()
             self.metric_loggers[f"loss_{i}"].update(local_loss.detach())
-
-            if self.trainer.is_global_zero:
-                self.update_slot_counts(a)
-                print(self.slot_counts / self.slot_counts.sum().tolist())
-
             loss += local_loss
 
-        return loss, attn_maps
+        if self.trainer.is_global_zero:
+            self.update_slot_counts(rets[-1]["attn"]) # type: ignore
+
+        return loss, [r["attn"] for r in rets] # type: ignore
+
+    def training_step(self, x, batch_idx: int):  # type: ignore
+
+        seq_mask = x.get("sequence_mask")
+        x = x["frames"]
+
+        loss, attn = self.forward(x, seq_mask)
+
+        if batch_idx % self.trainer.accumulate_grad_batches == 0:
+            self.log_metrics()
+
+        if (
+            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
+            and self.trainer.is_global_zero
+            and self.gif is None
+        ):
+            attn = [rearrange(a, "b t ... -> (b t) ...") for a in attn]
+            with torch.no_grad():
+                attn_plots = plot_attention_hierarchical(
+                    imgs=x,
+                    attn_maps=attn,
+                    res=self.resolution,
+                    patch_size=self.patch_size,
+                )
+
+            log_dict = {}
+            for i, attn_plot in enumerate(attn_plots):
+                log_dict[f"attention_{i}"] = wandb.Video(
+                    (attn_plot.cpu().numpy() * 255).astype("uint8"),
+                    fps=self.log_config["fps"],
+                    format="gif",
+                )
+            self.logger.experiment.log(log_dict)  # type: ignore
+
+            self.gif = log_dict
+
+        return loss
+
+    def validation_step(self, x):
+        raise NotImplementedError
 
     def log_metrics(self):
 
@@ -369,7 +408,7 @@ class InterpreterTrainer(pl.LightningModule):
             plt.figure(figsize=(10, 6))
             self.slot_counts = self.slot_counts / self.slot_counts.sum()
             sns.barplot(
-                x=list(range(17)),
+                x=list(range(1, self.slot_counts.shape[0] + 1)),
                 y=self.slot_counts.cpu().numpy(),
             )
             plt.yscale("log")
@@ -390,52 +429,14 @@ class InterpreterTrainer(pl.LightningModule):
                 }
             )
 
-        self.slot_counts = torch.zeros(17, device="cuda")
+        self.slot_counts = torch.zeros_like(self.slot_counts, device="cuda")
         plt.close()
-
-    def training_step(self, x, batch_idx: int):  # type: ignore
-        # if training with images
-
-        seq_mask = x["sequence_mask"]
-        x = x["frames"]
-
-        loss, attn_maps = self.forward(x, seq_mask)
-
-        if batch_idx % self.trainer.accumulate_grad_batches == 0:
-            self.log_metrics()
-
-        if (
-            isinstance(self.logger, pl.pytorch.loggers.WandbLogger)  # type: ignore
-            and self.trainer.is_global_zero
-            and self.gif is None
-        ):
-            attn_maps = [rearrange(a, "b t ... -> (b t) ...") for a in attn_maps]
-            with torch.no_grad():
-                attn_plots = plot_attention_hierarchical(
-                    imgs=x,
-                    attn_maps=attn_maps,
-                    res=self.resolution,
-                    patch_size=self.patch_size,
-                )
-
-            log_dict = {}
-            for i, attn_plot in enumerate(attn_plots):
-                log_dict[f"attention_{i}"] = wandb.Video(
-                    (attn_plot.cpu().numpy() * 255).astype("uint8"),
-                    fps=self.log_config["fps"],
-                    format="gif",
-                )
-            self.logger.experiment.log(log_dict)  # type: ignore
-
-            self.gif = log_dict
-
-        return loss
-
-    def validation_step(self, x):
-        raise NotImplementedError
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
+
+        if hasattr(self, "tsa_scheduler"):
+            self.model.blocks[-1].slot_attention.threshold = self.tsa_scheduler(self.global_step)  # type: ignore
 
     def configure_optimizers(self):  # type: ignore
         optimizer = AdamW(
@@ -443,6 +444,14 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
+
+
+        if "tsa_warmup" in self.optimizer_config:
+            self.tsa_scheduler = LinearSchedule(
+                start=self.optimizer_config["tsa_start_threshold"],
+                end=self.optimizer_config["tsa_end_threshold"],
+                duration=self.optimizer_config["tsa_warmup"] * steps_per_epoch,
+            )
 
         scheduler = WarmupCosineSchedule(
             optimizer,
