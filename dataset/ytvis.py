@@ -4,7 +4,6 @@ from random import Random
 
 import lightning.pytorch as pl
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision.io import read_file, decode_jpeg, decode_png
@@ -15,11 +14,9 @@ from torchvision.transforms.v2 import (
     Resize,
     ToDtype,
     ToImage,
-    ToTensor,
     RandomHorizontalFlip,
 )
 
-from time import time
 
 class YTVIS(Dataset):
     def __init__(self, file_root, sequence_length, resolution, split="train"):
@@ -27,7 +24,6 @@ class YTVIS(Dataset):
         Args:
             file_root (string): Directory with all the video folders.
             sequence_length (int): Number of frames in each sequence.
-            transform (callable, optional): Optional transform to be applied on a sample.
         """
         self.file_root = file_root
         self.sequence_length = sequence_length
@@ -130,30 +126,12 @@ class YTVIS(Dataset):
         frame_paths = self.video_sequences[video_idx][
             start_idx : start_idx + self.sequence_length
         ]
-
-        padding = self.sequence_length - len(frame_paths)
-        pre_pad = torch.randint(0, padding + 1, (1,)).item()
-        post_pad = padding - pre_pad
-
-        frames = torch.stack([decode_jpeg(read_file(frame_path)) for frame_path in frame_paths])
+ 
+        frames = [decode_jpeg(read_file(frame_path)) for frame_path in frame_paths]
+        frames = (frames * (self.sequence_length // len(frames) + 1))[:self.sequence_length]
 
         out = {}
-        frames = self.transform(frames)
-
-        out["frames"] = torch.cat(
-            [
-                torch.zeros(pre_pad, *frames.shape[1:], device="cpu"), # type: ignore
-                frames, 
-                torch.zeros(post_pad, *frames.shape[1:], device="cpu")
-            ]
-        )
-
-        out["sequence_mask"] = torch.ones(self.sequence_length).bool()
-        if pre_pad > 0:
-            out["sequence_mask"][:pre_pad] = False
-        if post_pad > 0:
-            out["sequence_mask"][-post_pad:] = False
-
+        out["frames"] = self.transform(torch.stack(frames))
 
         if self.split == "val":
             mask_paths = [
@@ -161,14 +139,7 @@ class YTVIS(Dataset):
                 for path in frame_paths
             ]
             masks = torch.stack([decode_png(read_file(mask_path)) for mask_path in mask_paths])
-            masks = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
-            out["masks"] = torch.cat(
-                [
-                    torch.zeros(pre_pad, *masks.shape[1:], dtype=torch.long), # type: ignore
-                    masks, 
-                    torch.zeros(post_pad, *masks.shape[1:], dtype=torch.long)
-                ]
-            )
+            out["masks"] = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
 
         return out
 
