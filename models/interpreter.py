@@ -1,5 +1,4 @@
 import lightning as pl
-
 import timm
 import torch
 import wandb
@@ -11,12 +10,8 @@ from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
+from utils.plot import plot_attention_hierarchical
 from utils.schedulers import WarmupCosineSchedule
-from utils.plot import (
-    plot_attention_interpreter_hierarchical,
-    plot_attention_hierarchical,
-    plot_attention_simple,
-)
 from x_transformers import Encoder
 
 
@@ -82,8 +77,7 @@ class InterpreterBlock(nn.Module):
             input_dim=self.dim,
             slot_dim=self.slot_dim,
             n_slots=self.n_slots,
-            sampler=config.get("sampler", "gaussian"),
-            n_iters=8,
+            **config.get("sa_kwargs", {}),
         )
 
         if "enc_depth" in config:
@@ -325,8 +319,8 @@ class InterpreterTrainer(pl.LightningModule):
 
     def training_step(self, x, batch_idx: int):  # type: ignore
         # if training with images
-        if len(x.shape) == 4:
-            x = rearrange(x, "b c h w -> b 1 c h w")
+        #
+        x = x["frames"]
 
         loss, attn_maps = self.forward(x)
 
