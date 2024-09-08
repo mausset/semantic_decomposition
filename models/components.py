@@ -54,17 +54,16 @@ class GaussianPrior(nn.Module):
         nn.init.xavier_uniform_(init_log_sigma)
         self.init_log_sigma = nn.Parameter(init_log_sigma.squeeze())
 
-    def forward(self, x, n, sample=None):
+    def forward(self, x, n, sample_same=False):
         b, _, _ = x.shape
 
         mu = repeat(self.init_mu, "d -> b n d", b=b, n=n)
         log_sigma = repeat(self.init_log_sigma, "d -> b n d", b=b, n=n)
-        if sample is None:
-            sample = mu + log_sigma.exp() * torch.randn_like(mu)
-        else:
-            sample = mu + log_sigma.exp() * sample
 
-        return sample
+        if sample_same:
+            return mu + log_sigma.exp() * torch.randn_like(mu[0]).unsqueeze(0)
+
+        return mu + log_sigma.exp() * torch.randn_like(mu)
 
 
 class SwiGLUFFN(nn.Module):

@@ -7,7 +7,7 @@ import seaborn as sns
 import timm
 import torch
 import wandb
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoderV1
 from models.slot_attention import SA, TSA
@@ -82,19 +82,18 @@ class InterpreterBlock(nn.Module):
         self.time_pe = PositionalEncoding1D(self.slot_dim)
 
         if config.get("sa_arch", "sa") == "sa":
-            self.slot_attention = SA(
-                input_dim=self.dim,
-                slot_dim=self.slot_dim,
-                n_slots=self.n_slots,
-                **config.get("sa_kwargs", {}),
-            )
+            arch = SA
         elif config["sa_arch"] == "tsa":
-            self.slot_attention = TSA(
-                input_dim=self.dim,
-                slot_dim=self.slot_dim,
-                n_slots=self.n_slots,
-                **config.get("sa_kwargs", {}),
-            )
+            arch = TSA
+        else:
+            raise ValueError(f"Unknown arch: {config['sa_arch']}")
+
+        self.slot_attention = arch(
+            input_dim=self.dim,
+            slot_dim=self.slot_dim,
+            n_slots=self.n_slots,
+            **config.get("sa_kwargs", {}),
+        )
 
         if "enc_depth" in config:
             self.encoder = Encoder(
@@ -103,6 +102,7 @@ class InterpreterBlock(nn.Module):
                 ff_glu=True,
                 attn_flash=True,
             )
+            self.registers = nn.Parameter(torch.randn(1, self.n_slots, self.dim))
         else:
             self.encoder = None
 
@@ -143,14 +143,17 @@ class InterpreterBlock(nn.Module):
         assert t % self.time_shrink == 0, "Time shrink must divide sequence length"
 
         if seq_mask is not None:
-            seq_mask = repeat(seq_mask, "b t -> b t n", n=n)
+            seq_mask = repeat(seq_mask, "b t -> b t n", n=n + self.n_slots)
             seq_mask = self.shrink_time(seq_mask)
             seq_mask = rearrange(seq_mask, "b t n -> (b t) n")
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
         if self.encoder is not None:
+            # reg = repeat(self.registers, "1 n d -> (b 1) n d", b=x.shape[0])
+            # x, ps = pack((x, reg), "b * d")
             x = self.encoder(x, mask=seq_mask)
+            # x, _ = unpack(x, ps, "b * d")
 
         ret = self.slot_attention(x, context_mask=seq_mask)
         ret["slots"] = rearrange(ret["slots"], "(b t) ... -> b t ...", b=b)
@@ -214,7 +217,9 @@ class Interpreter(nn.Module):
 
         ret = self.blocks[-1](x, seq_mask=seq_mask)
         ret["target"] = x
-        ret["prediction"] = self.blocks[-1].decode(ret["slots"], context_mask=ret.get("mask"))
+        ret["prediction"] = self.blocks[-1].decode(
+            ret["slots"], context_mask=ret.get("mask")
+        )
 
         out.append(ret)
 
@@ -310,8 +315,8 @@ class InterpreterTrainer(pl.LightningModule):
         max_idx = attn.argmax(dim=-1)
         active = [len(set(row.tolist())) for row in max_idx]
         self.slot_counts += torch.bincount(
-            torch.tensor(active, device="cuda"), 
-            minlength=self.slot_counts.shape[0]+1,
+            torch.tensor(active, device="cuda"),
+            minlength=self.slot_counts.shape[0] + 1,
         )[1:]
 
     def forward(self, x, seq_mask=None, stage="train"):
@@ -323,7 +328,7 @@ class InterpreterTrainer(pl.LightningModule):
 
         loss = 0
         for i, r in enumerate(rets):
-            if "ignore" in r: # type: ignore
+            if "ignore" in r:  # type: ignore
                 continue
             t = rearrange(r["target"], "b t ... -> (b t) ...")
             p = rearrange(r["prediction"], "b t ... -> (b t) ...")
@@ -338,9 +343,9 @@ class InterpreterTrainer(pl.LightningModule):
             loss += local_loss
 
         if self.trainer.is_global_zero:
-            self.update_slot_counts(rets[-1]["attn"]) # type: ignore
+            self.update_slot_counts(rets[-1]["attn"])  # type: ignore
 
-        return loss, [r["attn"] for r in rets] # type: ignore
+        return loss, [r["attn"] for r in rets]  # type: ignore
 
     def training_step(self, x, batch_idx: int):  # type: ignore
 
@@ -444,7 +449,6 @@ class InterpreterTrainer(pl.LightningModule):
         )
 
         steps_per_epoch = self.trainer.estimated_stepping_batches / self.trainer.max_epochs  # type: ignore
-
 
         if "tsa_warmup" in self.optimizer_config:
             self.tsa_scheduler = LinearSchedule(

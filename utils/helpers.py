@@ -44,3 +44,27 @@ def attn_to_register_mask(attn, n_registers):
         masks.append(torch.bmm(mask[:, i, None].transpose(1, 2), mask[:, i, None]))
 
     return torch.stack(masks, dim=1).sum(dim=1).bool()
+
+
+def cluster_vectors(x, threshold, mask):
+    B, N, _ = x.shape
+    x_norm = x / x.norm(dim=-1, keepdim=True)
+    cos_sim = torch.matmul(x_norm, x_norm.transpose(-2, -1))
+
+    centroids = torch.zeros_like(x)
+
+    print((cos_sim - torch.eye(N, device=x.device)).max())
+
+    for b in range(B):
+        for i in range(N):
+            if mask[b, i]:
+                similar = (cos_sim[b, i] > threshold) & mask[b]
+                if torch.sum(similar) > 1:
+                    mask[b, similar] = False
+                    mask[b, i] = True
+                    centroids[b, i] = x[b, similar].mean(dim=0)
+                else:
+                    centroids[b, i] = x[b, i]
+
+    centroids = centroids * mask.unsqueeze(-1)
+    return centroids, mask

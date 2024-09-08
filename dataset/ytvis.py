@@ -120,15 +120,30 @@ class YTVIS(Dataset):
             video_idx += 1
         return video_idx, idx
 
+    def extend_with_repeats(self, frames):
+        if len(frames) == self.sequence_length:
+            return frames
+
+        total_items = len(frames)
+        expansion_factor = (self.sequence_length // total_items) + 1
+
+        expanded_list = [item for item in frames for _ in range(expansion_factor)]
+
+        start_index = torch.randint(
+            0, len(expanded_list) - self.sequence_length, (1,)
+        ).item()
+
+        return expanded_list[start_index : start_index + self.sequence_length]
+
     def __getitem__(self, idx):
         video_idx, start_idx = self.idx_to_video(idx)
 
         frame_paths = self.video_sequences[video_idx][
             start_idx : start_idx + self.sequence_length
         ]
- 
+
         frames = [decode_jpeg(read_file(frame_path)) for frame_path in frame_paths]
-        frames = (frames * (self.sequence_length // len(frames) + 1))[:self.sequence_length]
+        frames = self.extend_with_repeats(frames)
 
         out = {}
         out["frames"] = self.transform(torch.stack(frames))
@@ -138,7 +153,9 @@ class YTVIS(Dataset):
                 path.replace("JPEGImages", "Annotations").replace("jpg", "png")
                 for path in frame_paths
             ]
-            masks = torch.stack([decode_png(read_file(mask_path)) for mask_path in mask_paths])
+            masks = torch.stack(
+                [decode_png(read_file(mask_path)) for mask_path in mask_paths]
+            )
             out["masks"] = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
 
         return out

@@ -1,17 +1,11 @@
 import lightning as pl
-import matplotlib
 import torch
 from einops import rearrange, repeat
-from geomloss import SamplesLoss
-from models.components import GaussianDependent, GaussianPrior, SwiGLUFFN
+from models.components import GaussianDependent, GaussianPrior
 from torch import nn
-
-# matplotlib.use("Qt5Agg")
-import matplotlib.pyplot as plt
+from utils.helpers import cluster_vectors
 
 from sklearn.cluster import AgglomerativeClustering
-
-plt.ion()
 
 
 class SA(pl.LightningModule):
@@ -26,6 +20,7 @@ class SA(pl.LightningModule):
         cluster_drop_p=0.1,
         implicit=True,
         sampler="gaussian",
+        sample_same=False,
         eps=1e-8,
     ):
         super().__init__()
@@ -36,6 +31,7 @@ class SA(pl.LightningModule):
         self.distance_threshold = distance_threshold
         self.cluster_drop_p = cluster_drop_p
         self.implicit = implicit
+        self.sample_same = sample_same
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -63,13 +59,11 @@ class SA(pl.LightningModule):
         self.norm_slots = nn.LayerNorm(slot_dim)
         self.norm_pre_ff = nn.LayerNorm(slot_dim)
 
-    def sample(self, x, n_slots, sample=None):
-        if sample is not None:
-            return sample
+    def sample(self, x, n_slots):
 
         if isinstance(self.sampler, nn.Parameter):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
-        return self.sampler(x, n_slots)  # type: ignore
+        return self.sampler(x, n_slots, self.sample_same)  # type: ignore
 
     def inv_cross_attn(self, q, k, v, slot_mask=None, context_mask=None):
 
@@ -247,12 +241,23 @@ class TSA(pl.LightningModule):
 
         return updates, attn_vis, dots
 
-    def step(self, slots, k, v, return_attn=False, return_dots=False, slot_mask=None, context_mask=None):
+    def step(
+        self,
+        slots,
+        k,
+        v,
+        return_attn=False,
+        return_dots=False,
+        slot_mask=None,
+        context_mask=None,
+    ):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
-        updates, attn, dots = self.inv_cross_attn(q, k, v, slot_mask=slot_mask, context_mask=context_mask)
+        updates, attn, dots = self.inv_cross_attn(
+            q, k, v, slot_mask=slot_mask, context_mask=context_mask
+        )
 
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
@@ -292,7 +297,9 @@ class TSA(pl.LightningModule):
         trace = rearrange(trace, "(b n) -> b n", b=b)
 
         idx = [torch.where(row < self.threshold)[0] for row in trace]
-        idx = torch.tensor([row[-1] if row.shape[0] > 0 else 1 for row in idx], device=slots.device)
+        idx = torch.tensor(
+            [row[-1] if row.shape[0] > 0 else 1 for row in idx], device=slots.device
+        )
         torch.clamp_(idx, min=2)
 
         idx = repeat(
@@ -324,7 +331,9 @@ class TSA(pl.LightningModule):
             v_batch = repeat(v, "b ... -> (b n) ...", n=self.n_slots)
             batch_context_mask = None
             if context_mask is not None:
-                batch_context_mask = repeat(context_mask, "b ... -> (b n) ...", n=self.n_slots)
+                batch_context_mask = repeat(
+                    context_mask, "b ... -> (b n) ...", n=self.n_slots
+                )
             slot_mask = torch.tril(
                 torch.ones(
                     self.n_slots,
@@ -337,7 +346,12 @@ class TSA(pl.LightningModule):
 
             for _ in range(self.n_iters):
                 slots, dots = self.step(  # type: ignore
-                    slots, k_batch, v_batch, slot_mask=slot_mask, context_mask=batch_context_mask, return_dots=True
+                    slots,
+                    k_batch,
+                    v_batch,
+                    slot_mask=slot_mask,
+                    context_mask=batch_context_mask,
+                    return_dots=True,
                 )
 
             slots = rearrange(slots, "(b n) ... -> b n ...", b=x.shape[0])
