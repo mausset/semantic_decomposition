@@ -4,7 +4,7 @@ import torch
 import wandb
 from einops import rearrange, repeat, pack, unpack
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoder, TransformerDecoderOld
+from models.decoder import TransformerDecoderV2, TransformerDecoderV1
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
@@ -92,7 +92,7 @@ class InterpreterBlock(nn.Module):
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoder(
+        self.decoder = TransformerDecoderV1(
             dim=self.dim,
             depth=config["dec_depth"],
             resolution=self.decode_res,
@@ -134,16 +134,16 @@ class InterpreterBlock(nn.Module):
             x = self.encoder(x)
             x, _ = unpack(x, ps, "b * d")
 
-        slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
+        slots, attn_map, mask = self.slot_attention(x, n_slots=self.n_slots)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
 
-        return slots, attn_map
+        return slots, attn_map, mask
 
-    def decode(self, x):
+    def decode(self, x, mask=None):
         b, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.decoder(x)
+        x = self.decoder(x, mask=mask)
         x = rearrange(
             x,
             "(b t) (s n) d -> b (t s) n d",  # Ablate this
@@ -188,14 +188,14 @@ class Interpreter(nn.Module):
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
             for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map = block(x)
+                x, attn_map, _ = block(x)
                 attn_maps.append(attn_map)
                 x = x.detach()
 
         features = [x]
-        x, attn_map = self.blocks[-1](x)
+        x, attn_map, mask = self.blocks[-1](x)
         attn_maps.append(attn_map)
-        decoded = [self.blocks[-1].decode(x)]
+        decoded = [self.blocks[-1].decode(x, mask=mask)]
 
         return decoded, features, attn_maps
 

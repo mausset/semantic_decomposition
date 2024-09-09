@@ -3,7 +3,8 @@ import torch
 from einops import rearrange, repeat
 from torch import nn
 
-from models.components import SwiGLUFFN, GaussianPrior, GaussianDependent
+from models.components import GaussianPrior, GaussianDependent
+from sklearn.cluster import AgglomerativeClustering
 
 
 class SA(pl.LightningModule):
@@ -14,18 +15,18 @@ class SA(pl.LightningModule):
         slot_dim,
         n_iters=8,
         n_slots=8,
+        distance_threshold=None,
         implicit=True,
-        ff_swiglu=False,
         sampler="gaussian",
-        vis_post_weight_attn=False,
         eps=1e-8,
     ):
         super().__init__()
         self.in_dim = input_dim
         self.slot_dim = slot_dim
         self.n_iters = n_iters
+        self.n_slots = n_slots
+        self.distance_threshold = distance_threshold
         self.implicit = implicit
-        self.vis_post_weight_attn = vis_post_weight_attn
         self.eps = eps
 
         self.scale = input_dim**-0.5
@@ -43,14 +44,11 @@ class SA(pl.LightningModule):
 
         self.gru = nn.GRUCell(slot_dim, slot_dim)
 
-        if ff_swiglu:
-            self.mlp = SwiGLUFFN(slot_dim)
-        else:
-            self.mlp = nn.Sequential(
-                nn.Linear(slot_dim, slot_dim * 4),
-                nn.ReLU(inplace=True),
-                nn.Linear(slot_dim * 4, slot_dim),
-            )
+        self.mlp = nn.Sequential(
+            nn.Linear(slot_dim, slot_dim * 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(slot_dim * 4, slot_dim),
+        )
 
         self.norm_input = nn.LayerNorm(input_dim)
         self.norm_slots = nn.LayerNorm(slot_dim)
@@ -75,8 +73,6 @@ class SA(pl.LightningModule):
 
         attn = attn + self.eps
         attn = attn / attn.sum(dim=-1, keepdim=True)
-        if self.vis_post_weight_attn:
-            attn_vis = attn
 
         updates = torch.einsum("bjd,bij->bid", v, attn)
 
@@ -108,6 +104,35 @@ class SA(pl.LightningModule):
 
         return slots
 
+    def cluster_slots(self, slots, attn):
+        b, n, _ = slots.shape
+
+        cluster_means = torch.zeros_like(slots, device=slots.device)
+        cluster_attn = torch.zeros_like(attn, device=slots.device)
+        mask = torch.zeros(b, n, device=slots.device, dtype=torch.bool)
+        for i in range(b):
+            labels = AgglomerativeClustering(
+                metric="cosine",
+                compute_full_tree=True,  # type: ignore
+                linkage="complete",
+                n_clusters=None,  # type: ignore
+                distance_threshold=self.distance_threshold,
+            ).fit_predict(slots[i].cpu().detach().numpy())
+
+            if labels.max() < 2:
+                cluster_means[i] = slots[i]
+                cluster_attn[i] = attn[i]
+                mask[i] = True
+                continue
+
+            mask[i, : labels.max() + 1] = True
+            for j in range(labels.max() + 1):
+                cluster_mask = torch.tensor(labels == j, device=slots.device)
+                cluster_means[i, j] = slots[i, cluster_mask].mean(dim=0)
+                cluster_attn[i, j] = attn[i, cluster_mask].sum(dim=0)
+
+        return cluster_means, cluster_attn, mask
+
     def forward(self, x, n_slots=8, mask=None):
 
         x = self.norm_input(x)
@@ -126,6 +151,9 @@ class SA(pl.LightningModule):
 
         slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
 
+        if self.distance_threshold is not None:
+            slots, attn_map, mask = self.cluster_slots(slots, attn_map)
+
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
-        return slots, attn_map
+        return slots, attn_map, mask

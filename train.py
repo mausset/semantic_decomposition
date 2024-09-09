@@ -2,7 +2,10 @@ import torch
 from lightning.pytorch.cli import LightningCLI, SaveConfigCallback
 from lightning.pytorch.loggers import WandbLogger
 import wandb
-import os
+import warnings
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
+warnings.simplefilter(action="ignore", category=UserWarning)
 
 
 class MySaveConfigCallback(SaveConfigCallback):
@@ -30,7 +33,7 @@ class MySaveConfigCallback(SaveConfigCallback):
 
 
 def main():
-    #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     torch.set_printoptions(precision=4, linewidth=200, sci_mode=True)
 
     LightningCLI(
