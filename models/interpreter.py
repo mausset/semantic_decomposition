@@ -2,7 +2,7 @@ import lightning as pl
 import timm
 import torch
 import wandb
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
 from geomloss import SamplesLoss
 from models.decoder import TransformerDecoder, TransformerDecoderOld
 from models.slot_attention import SA
@@ -87,6 +87,8 @@ class InterpreterBlock(nn.Module):
                 ff_glu=True,
                 attn_flash=True,
             )
+            self.registers = nn.Parameter(torch.zeros(1, self.n_slots, self.dim))
+            torch.nn.init.xavier_normal_(self.registers)
         else:
             self.encoder = None
 
@@ -127,7 +129,10 @@ class InterpreterBlock(nn.Module):
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
         if self.encoder is not None:
+            regs = repeat(self.registers, "1 n d -> b n d", b=x.shape[0])
+            x, ps = pack((x, regs), "b * d")
             x = self.encoder(x)
+            x, _ = unpack(x, ps, "b * d")
 
         slots, attn_map = self.slot_attention(x, n_slots=self.n_slots)
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
