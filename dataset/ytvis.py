@@ -142,10 +142,11 @@ class YTVIS(Dataset):
             start_idx : start_idx + self.sequence_length
         ]
 
+        out = {}
         frames = [decode_jpeg(read_file(frame_path)) for frame_path in frame_paths]
+        out["n_frames"] = len(frames)
         frames = self.extend_with_repeats(frames)
 
-        out = {}
         out["frames"] = self.transform(torch.stack(frames))
 
         if self.split == "val":
@@ -154,8 +155,11 @@ class YTVIS(Dataset):
                 for path in frame_paths
             ]
             masks = torch.stack(
-                [decode_png(read_file(mask_path)) for mask_path in mask_paths]
+                self.extend_with_repeats(
+                    [decode_png(read_file(mask_path)) for mask_path in mask_paths]
+                )
             )
+
             out["masks"] = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
 
         return out

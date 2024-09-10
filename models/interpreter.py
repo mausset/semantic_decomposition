@@ -199,6 +199,23 @@ class Interpreter(nn.Module):
 
         return decoded, features, attn_maps
 
+    def forward_features(self, x):
+        b = x.shape[0]
+
+        x = rearrange(x, "b t ... -> (b t) ...")
+        x = self.base(x)
+        x = rearrange(x, "(b t) ... -> b t ...", b=b)
+
+        attn_maps = []
+        features = [x]
+        for block in self.blocks:  # type: ignore
+            x, attn_map, _ = block(x)
+            features.append(x)
+            attn_maps.append(attn_map)
+            x = x.detach()
+
+        return features, attn_maps
+
     def forward(self, x, current_block=None):
         b = x.shape[0]
 

@@ -1,4 +1,5 @@
 import torch
+from einops import repeat
 
 
 def block_causal_mask(t, n, device):
@@ -23,24 +24,12 @@ def apply_mask(x, mask):
     return gathered
 
 
-@torch.no_grad()
-def attn_to_register_mask(attn, n_registers):
-    """
-    attn: (B, N, N)
-    """
-    attn = attn[:, :n_registers]
+def propagate_attention(attn):
+    r = 1
+    for i in range(1, len(attn)):
+        t = attn[i].shape[1] // attn[i - 1].shape[2]
+        a = repeat(attn[i], "b (t n) ... -> (b r t) n ...", t=t, r=r)
+        attn[i] = torch.bmm(attn[i - 1], a)
+        r *= t
 
-    mask = (
-        torch.nn.functional.one_hot(attn.argmax(dim=1), num_classes=n_registers)
-        .permute(0, 2, 1)
-        .float()
-    )
-    mask[:, :n_registers, :n_registers] = 0
-    for i in range(n_registers):
-        mask[:, i, i] = 1
-
-    masks = []
-    for i in range(n_registers):
-        masks.append(torch.bmm(mask[:, i, None].transpose(1, 2), mask[:, i, None]))
-
-    return torch.stack(masks, dim=1).sum(dim=1).bool()
+    return attn

@@ -1,14 +1,21 @@
 import argparse
+import warnings
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from dataset.ytvis import YTVIS
 from einops import rearrange
 from models.interpreter import Interpreter
 from omegaconf import OmegaConf
-from utils.metrics import UnsupervisedMaskIoUMetric
-from dataset.ytvis import YTVIS
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+from utils.metrics import UnsupervisedMaskIoUMetric, ARIMetric
+from utils.helpers import propagate_attention
+
+# from utils.plot import plot_attention_hierarchical
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
+warnings.simplefilter(action="ignore", category=UserWarning)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default="configs/config.yaml")
@@ -16,19 +23,19 @@ parser.add_argument("--checkpoint", type=str, default=None)
 
 config = OmegaConf.load(parser.parse_args().config)
 
+mbo_i = UnsupervisedMaskIoUMetric(
+    matching="best_overlap",
+    ignore_background=True,
+    ignore_overlaps=True,
+).to("cuda")
 
-metrics = {
-    "mbo_i": UnsupervisedMaskIoUMetric(
-        matching="best_overlap",
-        ignore_background=True,
-        ignore_overlaps=True,
-    ).to("cuda"),
-    "miou": UnsupervisedMaskIoUMetric(
-        matching="hungarian",
-        ignore_background=True,
-        ignore_overlaps=True,
-    ).to("cuda"),
-}
+miou = UnsupervisedMaskIoUMetric(
+    matching="hungarian",
+    ignore_background=True,
+    ignore_overlaps=True,
+).to("cuda")
+
+fg_ari = ARIMetric(foreground=True, ignore_overlaps=True).to("cuda")
 
 
 model = (
@@ -40,13 +47,20 @@ model = (
     .eval()
 )
 
-model.load_state_dict(torch.load(parser.parse_args().checkpoint), strict=False)
+state_dict = torch.load(parser.parse_args().checkpoint)["state_dict"]
+state_dict = {k[6:]: v for k, v in state_dict.items()}
+decoder_keys = [k for k in state_dict.keys() if "decoder" in k]
+for k in decoder_keys:
+    del state_dict[k]
+
+model.load_state_dict(state_dict, strict=False)
 
 assert len(model.blocks) == 2, "Model must have 2 blocks for video segmentation"
 
 ytvis = DataLoader(
     YTVIS(**config.data.init_args.dataset_config, split="val"),
     batch_size=1,
+    shuffle=False,
 )
 
 resolution = config.data.init_args.dataset_config["resolution"]
@@ -54,17 +68,17 @@ patch_size = model.base.patch_size
 
 for batch in tqdm(ytvis):
     frames = batch["frames"].to("cuda")
-    masks = batch["masks"].to("cuda")
-    sequence_mask = batch["sequence_mask"].to("cuda")
+    print(batch["n_frames"])
+    masks = batch["masks"].to("cuda").long().squeeze(2)
 
     with torch.no_grad():
-        _, _, attn_maps, _ = model(frames, seq_mask=sequence_mask)
+        _, attn = model.forward_features(frames)
 
-    _, t, _, _ = attn_maps[0].shape
-    a0 = rearrange(attn_maps[0], "b t ... -> (b t) ...")
-    a1 = rearrange(attn_maps[1], "b t (s n) ... -> (b t s) n ...", s=t)
+    # attn_plot = plot_attention_hierarchical(frames, attn, (336, 504), patch_size)
+    # print(attn_plot[1].shape)
+    # exit()
 
-    attn = torch.bmm(a0, a1)
+    attn = propagate_attention(attn)[-1]
 
     attn = rearrange(
         attn,
@@ -76,15 +90,15 @@ for batch in tqdm(ytvis):
         .argmax(1)
         .unsqueeze(0)
     )
-    pred_mask = pred_mask[:, sequence_mask.squeeze(0)]
-    masks = masks[:, sequence_mask.squeeze(0)]
 
     p = F.one_hot(pred_mask).to(torch.float32).permute(0, 1, 4, 2, 3)
     t = F.one_hot(masks).to(torch.float32).permute(0, 1, 4, 2, 3)
 
-    metrics["mbo_i"].update(p, t)
-    metrics["miou"].update(p, t)
+    mbo_i.update(p, t)
+    miou.update(p, t)
+    for i in range(p.shape[1]):
+        fg_ari.update(p[:, i], t[:, i])
 
-
-print("MBO-IoU:", metrics["mbo_i"].compute())
-print("MIoU:", metrics["miou"].compute())
+    print("MBO-IoU:", mbo_i.compute())
+    print("MIoU:", miou.compute())
+    print("FG-ARI:", fg_ari.compute())
