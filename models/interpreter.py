@@ -232,7 +232,7 @@ class Interpreter(nn.Module):
         features = [x]
         decoded = []
         for block in blocks:  # type: ignore
-            x, attn_map = block(x)
+            x, attn_map, _ = block(x)
             features.append(x)
             attn_maps.append(attn_map)
             decoded.append(block.decode(x))
