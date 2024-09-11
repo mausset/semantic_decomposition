@@ -68,7 +68,6 @@ patch_size = model.base.patch_size
 
 for batch in tqdm(ytvis):
     frames = batch["frames"].to("cuda")
-    print(batch["n_frames"])
     masks = batch["masks"].to("cuda").long().squeeze(2)
 
     with torch.no_grad():
