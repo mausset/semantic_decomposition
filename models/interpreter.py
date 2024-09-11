@@ -123,27 +123,46 @@ class InterpreterBlock(nn.Module):
 
         return x
 
-    def forward(self, x):
+    def forward(self, x, sequence_mask):
         b, *_ = x.shape
 
         x = self.shrink_time(x, add_pe=True)
         x = rearrange(x, "b t ... -> (b t) ...")
+
+        sequence_mask = self.shrink_time(sequence_mask, add_pe=False)
+        sequence_mask = rearrange(sequence_mask, "b t ... -> (b t) ...")
+        slot_mask = sequence_mask.sum(dim=-1, keepdim=True).bool()
+
         if self.encoder is not None:
             regs = repeat(self.registers, "1 n d -> b n d", b=x.shape[0])
             x, ps = pack((x, regs), "b * d")
-            x = self.encoder(x)
+            reg_mask = torch.ones(b, self.n_slots, device=self.device).bool()
+            sequence_mask_w_regs, _ = pack((sequence_mask, reg_mask), "b *")
+            x = self.encoder(x, mask=sequence_mask_w_regs)
             x, _ = unpack(x, ps, "b * d")
 
-        slots, attn_map, mask = self.slot_attention(x, n_slots=self.n_slots)
+        slots, attn_map, mask = self.slot_attention(
+            x, n_slots=self.n_slots, context_mask=sequence_mask
+        )
         slots = rearrange(slots, "(b t) ... -> b t ...", b=b)
+        assert (
+            mask.shape[0] == slot_mask.shape[0]
+        ), f"{mask.shape[0]} != {slot_mask.shape[0]}"
+        mask = slot_mask * mask
+        mask = rearrange(mask, "(b t) ... -> b t ...", b=b)
 
         return slots, attn_map, mask
 
-    def decode(self, x, mask=None):
+    def decode(self, x, mask=None, context_mask=None):
         b, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
-        x = self.decoder(x, mask=mask)
+        if mask is not None:
+            mask = rearrange(mask, "b (t s) n -> (b t) (s n)", s=self.time_shrink)
+        if context_mask is not None:
+            context_mask = rearrange(context_mask, "b t ... -> (b t) ...")
+
+        x = self.decoder(x, mask=mask, context_mask=context_mask)
         x = rearrange(
             x,
             "(b t) (s n) d -> b (t s) n d",  # Ablate this
@@ -179,44 +198,51 @@ class Interpreter(nn.Module):
         for block in self.blocks[:-1]:  # type: ignore
             block.eval().requires_grad_(False)
 
-    def train_only_last(self, x):
+    def train_only_last(self, x, sequence_mask):
         b = x.shape[0]
 
         attn_maps = []
+        masks = []
         with torch.no_grad():
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
             x = rearrange(x, "(b t) ... -> b t ...", b=b)
+            sequence_mask = repeat(sequence_mask, "b t -> b t n", n=x.shape[2])
+            masks.append(sequence_mask)
             for block in self.blocks[:-1]:  # type: ignore
-                x, attn_map, _ = block(x)
+                x, attn_map, sequence_mask = block(x, sequence_mask)
                 attn_maps.append(attn_map)
+                masks.append(sequence_mask)
                 x = x.detach()
 
         features = [x]
-        x, attn_map, mask = self.blocks[-1](x)
+        x, attn_map, sequence_mask = self.blocks[-1](x, sequence_mask)
         attn_maps.append(attn_map)
-        decoded = [self.blocks[-1].decode(x, mask=mask)]
+        decoded = [
+            self.blocks[-1].decode(x, mask=masks[-1], context_mask=sequence_mask)
+        ]
 
-        return decoded, features, attn_maps
+        return decoded, features, attn_maps, masks
 
-    def forward_features(self, x):
+    def forward_features(self, x, sequence_mask):
         b = x.shape[0]
 
         x = rearrange(x, "b t ... -> (b t) ...")
         x = self.base(x)
         x = rearrange(x, "(b t) ... -> b t ...", b=b)
+        sequence_mask = repeat(sequence_mask, "b t -> b t n", n=x.shape[2])
 
         attn_maps = []
         features = [x]
         for block in self.blocks:  # type: ignore
-            x, attn_map, _ = block(x)
+            x, attn_map, sequence_mask = block(x, sequence_mask)
             features.append(x)
             attn_maps.append(attn_map)
             x = x.detach()
 
         return features, attn_maps
 
-    def forward(self, x, current_block=None):
+    def forward(self, x, sequence_mask, current_block=None):
         b = x.shape[0]
 
         with torch.no_grad():
@@ -232,7 +258,7 @@ class Interpreter(nn.Module):
         features = [x]
         decoded = []
         for block in blocks:  # type: ignore
-            x, attn_map, _ = block(x)
+            x, attn_map, _ = block(x, sequence_mask)
             features.append(x)
             attn_maps.append(attn_map)
             decoded.append(block.decode(x))
@@ -250,7 +276,7 @@ class InterpreterTrainer(pl.LightningModule):
         optimizer_config: dict = {},
         log_config: dict = {},
         layer_schedule: dict | None = {},
-        only_last: bool = False,
+        only_last: bool = True,
         loss: str = "sinkhorn",
         checkpoint_path: str | None = None,
     ):
@@ -302,19 +328,40 @@ class InterpreterTrainer(pl.LightningModule):
 
         return current
 
-    def forward(self, x, stage="train"):
+    def forward(self, x, sequence_mask, stage="train"):
 
         if self.only_last:
-            decoded, target, attn_maps = self.model.train_only_last(x)
+            decoded, target, attn_maps, masks = self.model.train_only_last(
+                x, sequence_mask
+            )
+            masks = masks[-len(decoded) :]
         else:
-            decoded, target, attn_maps = self.model.forward(x, current_block=self.current_block)  # type: ignore
+            decoded, target, attn_maps, masks = self.model.forward(x, sequence_mask, current_block=self.current_block)  # type: ignore
 
         loss = 0
         start = len(self.model.blocks) - 1 if self.only_last else 0
-        for i, (d, t) in enumerate(zip(decoded, target), start=start):
+        for i, (d, t, m) in enumerate(zip(decoded, target, masks), start=start):
             d = rearrange(d, "b t ... -> (b t) ...")
             t = rearrange(t, "b t ... -> (b t) ...")
-            local_loss = self.loss_fn(d, t.detach()).mean()
+
+            time_mask = rearrange(m.sum(dim=-1).bool(), "b t -> (b t)")
+            loss_w = m.sum(dim=-1).bool() / m.sum(dim=-1).bool().sum(
+                dim=-1, keepdim=True
+            )
+
+            loss_w = rearrange(loss_w, "b t -> (b t)")[time_mask]
+
+            d = d[time_mask]
+            t = t[time_mask]
+
+            if isinstance(self.loss_fn, nn.MSELoss):
+                local_loss = self.loss_fn(d, t)
+            else:
+                valid_mask = rearrange(m, "b t ... -> (b t) ...")[time_mask]
+                p_mass = valid_mask / valid_mask.sum(dim=-1, keepdim=True)
+                local_loss = (
+                    self.loss_fn(p_mass, d, p_mass, t.detach()) * loss_w
+                ).sum() / m.shape[0]
 
             self.metric_loggers[f"loss_{i}"](local_loss.detach())
             loss += local_loss
@@ -342,9 +389,10 @@ class InterpreterTrainer(pl.LightningModule):
     def training_step(self, x, batch_idx: int):  # type: ignore
         # if training with images
         #
+        sequence_mask = x["sequence_mask"]
         x = x["frames"]
 
-        loss, attn_maps = self.forward(x)
+        loss, attn_maps = self.forward(x, sequence_mask)
 
         if batch_idx % self.trainer.accumulate_grad_batches == 0:
             self.log_metrics()

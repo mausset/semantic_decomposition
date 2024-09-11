@@ -1,13 +1,14 @@
+import math
+
 import lightning as pl
 import torch
 from einops import rearrange, repeat
+from models.components import GaussianDependent, GaussianPrior
+from sklearn.cluster import AgglomerativeClustering
 from torch import nn
 
-from models.components import GaussianPrior, GaussianDependent
-from sklearn.cluster import AgglomerativeClustering
 
-
-class SA(pl.LightningModule):
+class SA(nn.Module):
 
     def __init__(
         self,
@@ -104,12 +105,46 @@ class SA(pl.LightningModule):
 
         return slots
 
+    def cluster_slots_vectorized(self, slots, attn):
+        with torch.no_grad():
+            norm_slots = torch.nn.functional.normalize(slots, p=2, dim=-1)
+            cosine_distance = 1 - torch.einsum("bnd,bmd->bnm", norm_slots, norm_slots)
+
+            adjacency_matrix = (cosine_distance < self.distance_threshold).float()
+
+            for _ in range(math.ceil(math.log2(self.n_slots))):
+                adjacency_matrix = torch.clamp(
+                    adjacency_matrix @ adjacency_matrix, max=1
+                )
+
+            adjacency_matrix = adjacency_matrix
+            cumsum = adjacency_matrix.cumsum(dim=1)
+            cluster_mask = adjacency_matrix * (cumsum <= 1)
+
+            counts = cluster_mask.any(dim=2).sum(dim=1)
+            reset_idx = counts < 2
+            print(reset_idx.float().mean())
+            cluster_mask[reset_idx] = torch.eye(
+                self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
+            )[None]
+
+            cluster_weight = cluster_mask / torch.clamp(
+                cluster_mask.sum(dim=2, keepdim=True), min=1
+            )
+
+        cluster_means = torch.bmm(cluster_weight, slots)
+        cluster_attn = torch.bmm(cluster_mask, attn)
+        cluster_mask = cluster_mask.any(dim=2)
+
+        return cluster_means, cluster_attn, cluster_mask
+
     def cluster_slots(self, slots, attn):
         b, n, _ = slots.shape
 
         cluster_means = torch.zeros_like(slots, device=slots.device)
         cluster_attn = torch.zeros_like(attn, device=slots.device)
         mask = torch.zeros(b, n, device=slots.device, dtype=torch.bool)
+        slots_cpu = slots.cpu().detach().numpy()
         for i in range(b):
             labels = AgglomerativeClustering(
                 metric="cosine",
@@ -117,7 +152,7 @@ class SA(pl.LightningModule):
                 linkage="complete",
                 n_clusters=None,  # type: ignore
                 distance_threshold=self.distance_threshold,
-            ).fit_predict(slots[i].cpu().detach().numpy())
+            ).fit_predict(slots_cpu[i])
 
             if labels.max() < 2:
                 cluster_means[i] = slots[i]
@@ -133,7 +168,7 @@ class SA(pl.LightningModule):
 
         return cluster_means, cluster_attn, mask
 
-    def forward(self, x, n_slots=8, mask=None):
+    def forward(self, x, n_slots=8, context_mask=None):
 
         x = self.norm_input(x)
 
@@ -144,15 +179,16 @@ class SA(pl.LightningModule):
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots = self.step(slots, k, v, mask=mask)
+            slots = self.step(slots, k, v, mask=context_mask)
 
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
 
-        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=mask)
+        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=context_mask)
 
+        mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
         if self.distance_threshold is not None:
-            slots, attn_map, mask = self.cluster_slots(slots, attn_map)
+            slots, attn_map, mask = self.cluster_slots_vectorized(slots, attn_map)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 

@@ -120,21 +120,6 @@ class YTVIS(Dataset):
             video_idx += 1
         return video_idx, idx
 
-    def extend_with_repeats(self, frames):
-        if len(frames) == self.sequence_length:
-            return frames
-
-        total_items = len(frames)
-        expansion_factor = (self.sequence_length // total_items) + 1
-
-        expanded_list = [item for item in frames for _ in range(expansion_factor)]
-
-        start_index = torch.randint(
-            0, len(expanded_list) - self.sequence_length, (1,)
-        ).item()
-
-        return expanded_list[start_index : start_index + self.sequence_length]
-
     def __getitem__(self, idx):
         video_idx, start_idx = self.idx_to_video(idx)
 
@@ -144,10 +129,14 @@ class YTVIS(Dataset):
 
         out = {}
         frames = [decode_jpeg(read_file(frame_path)) for frame_path in frame_paths]
+        padding = self.sequence_length - len(frames)
         out["n_frames"] = len(frames)
-        frames = self.extend_with_repeats(frames)
-
-        out["frames"] = self.transform(torch.stack(frames))
+        frames = self.transform(torch.stack(frames))
+        out["frames"] = torch.cat(
+            [frames, torch.zeros(padding, *frames.shape[1:], dtype=frames.dtype)], dim=0
+        )
+        out["sequence_mask"] = torch.zeros(self.sequence_length).bool()
+        out["sequence_mask"][: len(frames)] = True
 
         if self.split == "val":
             mask_paths = [
@@ -155,12 +144,14 @@ class YTVIS(Dataset):
                 for path in frame_paths
             ]
             masks = torch.stack(
-                self.extend_with_repeats(
-                    [decode_png(read_file(mask_path)) for mask_path in mask_paths]
-                )
+                [decode_png(read_file(mask_path)) for mask_path in mask_paths]
             )
 
-            out["masks"] = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
+            masks = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
+            masks = torch.cat(
+                [masks, torch.zeros(padding, *masks.shape[1:], dtype=masks.dtype)],
+                dim=0,
+            )
 
         return out
 

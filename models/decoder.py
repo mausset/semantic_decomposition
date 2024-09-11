@@ -88,7 +88,7 @@ class TransformerDecoderV1(nn.Module):
             # ff_swish=True,
         )
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, context_mask=None):
         """
         args:
             x: (B, N, D), extracted object representations
@@ -99,6 +99,11 @@ class TransformerDecoderV1(nn.Module):
         # target = self.pe(x, resolution)
         target = repeat(self.pos_embedding, "1 n d -> (b 1) n d", b=x.shape[0])
 
-        target = self.transformer(target, context=x, context_mask=mask)
+        target = self.transformer(
+            target,
+            context=x,
+            mask=mask,
+            context_mask=context_mask,
+        )
 
         return target
