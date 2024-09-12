@@ -17,6 +17,7 @@ class SA(nn.Module):
         n_iters=8,
         n_slots=8,
         distance_threshold=None,
+        linkage="single",
         implicit=True,
         sampler="gaussian",
         eps=1e-8,
@@ -38,6 +39,11 @@ class SA(nn.Module):
             self.sampler = GaussianDependent(slot_dim)
         elif sampler == "embedding":
             self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
+
+        if linkage == "single":
+            self.cluster_slots_vectorized = self.cluster_slots_vectorized_single
+        elif linkage == "complete":
+            self.cluster_slots_vectorized = self.cluster_slots_vectorized_complete
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -105,13 +111,19 @@ class SA(nn.Module):
 
         return slots
 
-    def cluster_slots_vectorized(self, slots, attn):
+    def cluster_slots_vectorized_complete(self, slots, attn):
         with torch.no_grad():
             norm_slots = torch.nn.functional.normalize(slots, p=2, dim=-1)
             cosine_distance = 1 - torch.einsum("bnd,bmd->bnm", norm_slots, norm_slots)
 
-            adjacency_matrix = (cosine_distance < self.distance_threshold).float()
+            M = cosine_distance.clone()
 
+            for k in range(self.n_slots):
+                M = torch.minimum(
+                    M, torch.maximum(M[:, :, k : k + 1], M[:, k : k + 1, :])
+                )
+
+            adjacency_matrix = (M < self.distance_threshold).float()
             for _ in range(math.ceil(math.log2(self.n_slots))):
                 adjacency_matrix = torch.clamp(
                     adjacency_matrix @ adjacency_matrix, max=1
@@ -119,12 +131,8 @@ class SA(nn.Module):
 
             cumsum = adjacency_matrix.cumsum(dim=1)
             cluster_mask = adjacency_matrix * (cumsum <= 1)
-
             counts = cluster_mask.any(dim=2).sum(dim=1)
             reset_idx = counts < 2
-            # print(reset_idx.float().mean())
-            # print((counts != self.n_slots).float().mean())
-
             cluster_mask[reset_idx] = torch.eye(
                 self.n_slots,
                 device=cluster_mask.device,
@@ -141,35 +149,37 @@ class SA(nn.Module):
 
         return cluster_means, cluster_attn, cluster_mask
 
-    def cluster_slots(self, slots, attn):
-        b, n, _ = slots.shape
+    def cluster_slots_vectorized_single(self, slots, attn):
+        with torch.no_grad():
+            norm_slots = torch.nn.functional.normalize(slots, p=2, dim=-1)
+            cosine_distance = 1 - torch.einsum("bnd,bmd->bnm", norm_slots, norm_slots)
 
-        cluster_means = torch.zeros_like(slots, device=slots.device)
-        cluster_attn = torch.zeros_like(attn, device=slots.device)
-        mask = torch.zeros(b, n, device=slots.device, dtype=torch.bool)
-        slots_cpu = slots.cpu().detach().numpy()
-        for i in range(b):
-            labels = AgglomerativeClustering(
-                metric="cosine",
-                compute_full_tree=True,  # type: ignore
-                linkage="complete",
-                n_clusters=None,  # type: ignore
-                distance_threshold=self.distance_threshold,
-            ).fit_predict(slots_cpu[i])
+            adjacency_matrix = (cosine_distance < self.distance_threshold).float()
+            for _ in range(math.ceil(math.log2(self.n_slots))):
+                adjacency_matrix = torch.clamp(
+                    adjacency_matrix @ adjacency_matrix, max=1
+                )
 
-            if labels.max() < 2:
-                cluster_means[i] = slots[i]
-                cluster_attn[i] = attn[i]
-                mask[i] = True
-                continue
+            cumsum = adjacency_matrix.cumsum(dim=1)
+            cluster_mask = adjacency_matrix * (cumsum <= 1)
+            counts = cluster_mask.any(dim=2).sum(dim=1)
+            reset_idx = counts < 2
 
-            mask[i, : labels.max() + 1] = True
-            for j in range(labels.max() + 1):
-                cluster_mask = torch.tensor(labels == j, device=slots.device)
-                cluster_means[i, j] = slots[i, cluster_mask].mean(dim=0)
-                cluster_attn[i, j] = attn[i, cluster_mask].sum(dim=0)
+            cluster_mask[reset_idx] = torch.eye(
+                self.n_slots,
+                device=cluster_mask.device,
+                dtype=cluster_mask.dtype,
+            )[None]
 
-        return cluster_means, cluster_attn, mask
+            cluster_weight = cluster_mask / torch.clamp(
+                cluster_mask.sum(dim=2, keepdim=True), min=1
+            )
+
+        cluster_means = torch.bmm(cluster_weight, slots)
+        cluster_attn = torch.bmm(cluster_mask, attn)
+        cluster_mask = cluster_mask.any(dim=2)
+
+        return cluster_means, cluster_attn, cluster_mask
 
     def forward(self, x, n_slots=8, context_mask=None):
 

@@ -11,7 +11,7 @@ from torch import nn
 from torch.optim.adamw import AdamW
 from torchmetrics.aggregation import MeanMetric
 from utils.plot import plot_attention_hierarchical
-from utils.schedulers import WarmupCosineSchedule
+from utils.schedulers import WarmupCosineSchedule, LinearSchedule
 from x_transformers import Encoder
 
 
@@ -345,6 +345,7 @@ class InterpreterTrainer(pl.LightningModule):
             t = rearrange(t, "b t ... -> (b t) ...")
 
             time_mask = rearrange(m.sum(dim=-1).bool(), "b t -> (b t)")
+
             loss_w = m.sum(dim=-1).bool() / m.sum(dim=-1).bool().sum(
                 dim=-1, keepdim=True
             )
@@ -430,6 +431,9 @@ class InterpreterTrainer(pl.LightningModule):
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
 
+        if hasattr(self, "blur_scheduler"):
+            self.loss_fn.blur = self.blur_scheduler(self.global_step)
+
     def configure_optimizers(self):  # type: ignore
         optimizer = AdamW(
             self.parameters(), weight_decay=self.optimizer_config["weight_decay"]
@@ -445,6 +449,16 @@ class InterpreterTrainer(pl.LightningModule):
             final_lr=self.optimizer_config["final_lr"],
             T_max=self.trainer.max_epochs * steps_per_epoch,  # type: ignore
         )
+
+        if "blur_warmup" in self.optimizer_config:
+            assert isinstance(
+                self.loss_fn, SamplesLoss
+            ), "Blur scheduler only for Sinkhorn"
+            self.blur_scheduler = LinearSchedule(
+                start=self.optimizer_config["blur_range"][0],
+                end=self.optimizer_config["blur_range"][1],
+                duration=self.optimizer_config["blur_warmup"] * steps_per_epoch,
+            )
 
         config = {
             "optimizer": optimizer,
