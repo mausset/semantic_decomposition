@@ -117,15 +117,18 @@ class SA(nn.Module):
                     adjacency_matrix @ adjacency_matrix, max=1
                 )
 
-            adjacency_matrix = adjacency_matrix
             cumsum = adjacency_matrix.cumsum(dim=1)
             cluster_mask = adjacency_matrix * (cumsum <= 1)
 
             counts = cluster_mask.any(dim=2).sum(dim=1)
             reset_idx = counts < 2
-            print(reset_idx.float().mean())
+            # print(reset_idx.float().mean())
+            # print((counts != self.n_slots).float().mean())
+
             cluster_mask[reset_idx] = torch.eye(
-                self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
+                self.n_slots,
+                device=cluster_mask.device,
+                dtype=cluster_mask.dtype,
             )[None]
 
             cluster_weight = cluster_mask / torch.clamp(
