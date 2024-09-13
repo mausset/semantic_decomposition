@@ -17,6 +17,7 @@ class SA(nn.Module):
         distance_threshold=None,
         linkage="single",
         implicit=True,
+        interleave_interval=0,
         cluster_pre=False,
         sampler="gaussian",
         eps=1e-8,
@@ -27,11 +28,15 @@ class SA(nn.Module):
         self.n_iters = n_iters
         self.n_slots = n_slots
         self.distance_threshold = distance_threshold
+        self.interleave_interval = interleave_interval
         self.cluster_pre = cluster_pre
         self.implicit = implicit
         self.eps = eps
 
         self.scale = input_dim**-0.5
+
+        if interleave_interval > 0:
+            assert n_iters % interleave_interval == 0
 
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
@@ -154,7 +159,7 @@ class SA(nn.Module):
                 self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
             )[None]
             eye = eye * slot_mask[:, :, None].float()
-            cluster_mask[reset_idx] = eye[reset_idx]
+            cluster_mask[reset_idx] = eye[reset_idx].to(cluster_mask.dtype)
 
             cluster_weight = cluster_mask / torch.clamp(
                 cluster_mask.sum(dim=2, keepdim=True), min=1
@@ -200,7 +205,7 @@ class SA(nn.Module):
                 self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
             )[None]
             eye = eye * slot_mask[:, :, None].float()
-            cluster_mask[reset_idx] = eye[reset_idx]
+            cluster_mask[reset_idx] = eye[reset_idx].to(cluster_mask.dtype)
 
             cluster_weight = cluster_mask / torch.clamp(
                 cluster_mask.sum(dim=2, keepdim=True), min=1
@@ -212,7 +217,7 @@ class SA(nn.Module):
 
         return cluster_means, cluster_attn, cluster_mask
 
-    def forward(self, x, n_slots, context_mask=None):
+    def forward_interleaved(self, x, n_slots, context_mask=None):
 
         x = self.norm_input(x)
 
@@ -236,7 +241,7 @@ class SA(nn.Module):
                 return_attn=True,
             )
             if (
-                (i + 1) % cluster_interval == 0 or i == self.n_iters - 1
+                (i + 1) % cluster_interval == 0 and i != self.n_iters - 1
             ) and self.distance_threshold is not None:
                 slots, attn_map, slot_mask = self.cluster_slots_vectorized(
                     slots, attn_map, slot_mask=slot_mask
@@ -254,54 +259,51 @@ class SA(nn.Module):
             context_mask=context_mask,
         )
 
-        if self.distance_threshold is not None:
-            slots, attn_map, slot_mask = self.cluster_slots_vectorized(
-                slots, attn_map, slot_mask=slot_mask
-            )
-
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
         return slots, attn_map, slot_mask
 
-    # def forward(self, x, n_slots, context_mask=None):
-    #
-    #     x = self.norm_input(x)
-    #
-    #     init_slots = self.sample(x, n_slots)
-    #     slots = init_slots.clone()
-    #
-    #     k = self.inv_cross_k(x)
-    #     v = self.inv_cross_v(x)
-    #
-    #     for _ in range(self.n_iters):
-    #         slots, attn_map = self.step(
-    #             slots,
-    #             k,
-    #             v,
-    #             context_mask=context_mask,
-    #             return_attn=True,
-    #         )
-    #
-    #     slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
-    #
-    #     if self.implicit:
-    #         slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
-    #
-    #     if self.cluster_pre and self.distance_threshold is not None:
-    #         slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
-    #
-    #     slots, attn_map = self.step(
-    #         slots,
-    #         k,
-    #         v,
-    #         return_attn=True,
-    #         slot_mask=slot_mask,
-    #         context_mask=context_mask,
-    #     )
-    #
-    #     if not self.cluster_pre and self.distance_threshold is not None:
-    #         slots, attn_map, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
-    #
-    #     attn_map = rearrange(attn_map, "b n hw -> b hw n")
-    #
-    #     return slots, attn_map, slot_mask
+    def forward(self, x, n_slots, context_mask=None):
+        if self.interleave_interval > 1:
+            return self.forward_interleaved(x, n_slots, context_mask)
+
+        x = self.norm_input(x)
+
+        init_slots = self.sample(x, n_slots)
+        slots = init_slots.clone()
+
+        k = self.inv_cross_k(x)
+        v = self.inv_cross_v(x)
+
+        for _ in range(self.n_iters):
+            slots, attn_map = self.step(
+                slots,
+                k,
+                v,
+                context_mask=context_mask,
+                return_attn=True,
+            )
+
+        slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
+
+        if self.implicit:
+            slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
+
+        if self.cluster_pre and self.distance_threshold is not None:
+            slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+
+        slots, attn_map = self.step(
+            slots,
+            k,
+            v,
+            return_attn=True,
+            slot_mask=slot_mask,
+            context_mask=context_mask,
+        )
+
+        if not self.cluster_pre and self.distance_threshold is not None:
+            slots, attn_map, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+
+        attn_map = rearrange(attn_map, "b n hw -> b hw n")
+
+        return slots, attn_map, slot_mask
