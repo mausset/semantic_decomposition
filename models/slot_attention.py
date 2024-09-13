@@ -1,10 +1,8 @@
 import math
 
-import lightning as pl
 import torch
 from einops import rearrange, repeat
 from models.components import GaussianDependent, GaussianPrior
-from sklearn.cluster import AgglomerativeClustering
 from torch import nn
 
 
@@ -19,6 +17,7 @@ class SA(nn.Module):
         distance_threshold=None,
         linkage="single",
         implicit=True,
+        cluster_pre=False,
         sampler="gaussian",
         eps=1e-8,
     ):
@@ -28,6 +27,7 @@ class SA(nn.Module):
         self.n_iters = n_iters
         self.n_slots = n_slots
         self.distance_threshold = distance_threshold
+        self.cluster_pre = cluster_pre
         self.implicit = implicit
         self.eps = eps
 
@@ -69,12 +69,14 @@ class SA(nn.Module):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
         return self.sampler(x, n_slots)  # type: ignore
 
-    def inv_cross_attn(self, q, k, v, mask=None):
+    def inv_cross_attn(self, q, k, v, slot_maske, context_mask):
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
-        if mask is not None:
+        if context_mask is not None:
             # NOTE: Masking attention is sensitive to the chosen value
-            dots.masked_fill_(~mask[:, None, :], -torch.finfo(k.dtype).max)
+            dots.masked_fill_(~context_mask[:, None, :], -torch.finfo(k.dtype).max)
+        if slot_maske is not None:
+            dots.masked_fill_(~slot_maske[:, :, None], -torch.finfo(k.dtype).max)
         attn = dots.softmax(dim=1)
         attn_vis = attn.clone()
 
@@ -85,12 +87,12 @@ class SA(nn.Module):
 
         return updates, attn_vis
 
-    def step(self, slots, k, v, return_attn=False, mask=None):
+    def step(self, slots, k, v, return_attn=False, slot_mask=None, context_mask=None):
         _, n, _ = slots.shape
 
         q = self.inv_cross_q(self.norm_slots(slots))
 
-        updates, attn = self.inv_cross_attn(q, k, v, mask=mask)
+        updates, attn = self.inv_cross_attn(q, k, v, slot_mask, context_mask)
 
         slots = rearrange(slots, "b n d -> (b n) d")
         updates = rearrange(updates, "b n d -> (b n) d")
@@ -194,15 +196,26 @@ class SA(nn.Module):
         for _ in range(self.n_iters):
             slots = self.step(slots, k, v, mask=context_mask)
 
+        slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
+
         if self.implicit:
             slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
 
-        slots, attn_map = self.step(slots, k, v, return_attn=True, mask=context_mask)
+        if self.cluster_pre and self.distance_threshold is not None:
+            slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
 
-        mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
-        if self.distance_threshold is not None:
-            slots, attn_map, mask = self.cluster_slots_vectorized(slots, attn_map)
+        slots, attn_map = self.step(
+            slots,
+            k,
+            v,
+            return_attn=True,
+            slot_mask=slot_mask,
+            context_maskmask=context_mask,
+        )
+
+        if not self.cluster_pre and self.distance_threshold is not None:
+            slots, attn_map, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
-        return slots, attn_map, mask
+        return slots, attn_map, slot_mask
