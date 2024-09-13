@@ -194,7 +194,13 @@ class SA(nn.Module):
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots, attn_map = self.step(slots, k, v, mask=context_mask, return_attn=True)
+            slots, attn_map = self.step(
+                slots,
+                k,
+                v,
+                context_mask=context_mask,
+                return_attn=True,
+            )
 
         slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
 
@@ -210,7 +216,7 @@ class SA(nn.Module):
             v,
             return_attn=True,
             slot_mask=slot_mask,
-            context_maskmask=context_mask,
+            context_mask=context_mask,
         )
 
         if not self.cluster_pre and self.distance_threshold is not None:
