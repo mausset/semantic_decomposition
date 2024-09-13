@@ -194,7 +194,7 @@ class SA(nn.Module):
         v = self.inv_cross_v(x)
 
         for _ in range(self.n_iters):
-            slots = self.step(slots, k, v, mask=context_mask)
+            slots, attn_map = self.step(slots, k, v, mask=context_mask, return_attn=True)
 
         slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
 
