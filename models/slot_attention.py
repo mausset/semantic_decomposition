@@ -69,14 +69,14 @@ class SA(nn.Module):
             return repeat(self.sampler, "n d -> b n d", b=x.shape[0])
         return self.sampler(x, n_slots)  # type: ignore
 
-    def inv_cross_attn(self, q, k, v, slot_maske, context_mask):
+    def inv_cross_attn(self, q, k, v, slot_mask, context_mask):
 
         dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
         if context_mask is not None:
             # NOTE: Masking attention is sensitive to the chosen value
             dots.masked_fill_(~context_mask[:, None, :], -torch.finfo(k.dtype).max)
-        if slot_maske is not None:
-            dots.masked_fill_(~slot_maske[:, :, None], -torch.finfo(k.dtype).max)
+        if slot_mask is not None:
+            dots.masked_fill_(~slot_mask[:, :, None], -torch.finfo(k.dtype).max)
         attn = dots.softmax(dim=1)
         attn_vis = attn.clone()
 
@@ -113,33 +113,48 @@ class SA(nn.Module):
 
         return slots
 
-    def cluster_slots_vectorized_complete(self, slots, attn):
+    def cluster_slots_vectorized_complete(self, slots, attn, slot_mask=None):
         with torch.no_grad():
+            if slot_mask is None:
+                slot_mask = torch.ones(
+                    slots.shape[0],
+                    slots.shape[1],
+                    device=slots.device,
+                    dtype=torch.bool,
+                )
             norm_slots = torch.nn.functional.normalize(slots, p=2, dim=-1)
             cosine_distance = 1 - torch.einsum("bnd,bmd->bnm", norm_slots, norm_slots)
 
-            M = cosine_distance.clone()
+            slot_mask_matrix = slot_mask[:, :, None] & slot_mask[:, None, :]
+            cosine_distance = cosine_distance.masked_fill(~slot_mask_matrix, 2.0)
 
+            M = cosine_distance.clone()
             for k in range(self.n_slots):
                 M = torch.minimum(
                     M, torch.maximum(M[:, :, k : k + 1], M[:, k : k + 1, :])
                 )
+            M = M.masked_fill(~slot_mask_matrix, 2.0)
 
             adjacency_matrix = (M < self.distance_threshold).float()
+            adjacency_matrix *= slot_mask_matrix.float()
+
             for _ in range(math.ceil(math.log2(self.n_slots))):
                 adjacency_matrix = torch.clamp(
                     adjacency_matrix @ adjacency_matrix, max=1
                 )
+                adjacency_matrix *= slot_mask_matrix.float()
 
             cumsum = adjacency_matrix.cumsum(dim=1)
             cluster_mask = adjacency_matrix * (cumsum <= 1)
+
             counts = cluster_mask.any(dim=2).sum(dim=1)
             reset_idx = counts < 2
-            cluster_mask[reset_idx] = torch.eye(
-                self.n_slots,
-                device=cluster_mask.device,
-                dtype=cluster_mask.dtype,
+
+            eye = torch.eye(
+                self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
             )[None]
+            eye = eye * slot_mask[:, :, None].float()
+            cluster_mask[reset_idx] = eye[reset_idx]
 
             cluster_weight = cluster_mask / torch.clamp(
                 cluster_mask.sum(dim=2, keepdim=True), min=1
@@ -147,31 +162,45 @@ class SA(nn.Module):
 
         cluster_means = torch.bmm(cluster_weight, slots)
         cluster_attn = torch.bmm(cluster_mask, attn)
-        cluster_mask = cluster_mask.any(dim=2)
+        cluster_mask = cluster_mask.any(dim=2) & slot_mask
 
         return cluster_means, cluster_attn, cluster_mask
 
-    def cluster_slots_vectorized_single(self, slots, attn):
+    def cluster_slots_vectorized_single(self, slots, attn, slot_mask=None):
         with torch.no_grad():
+            if slot_mask is None:
+                slot_mask = torch.ones(
+                    slots.shape[0],
+                    slots.shape[1],
+                    device=slots.device,
+                    dtype=torch.bool,
+                )
             norm_slots = torch.nn.functional.normalize(slots, p=2, dim=-1)
             cosine_distance = 1 - torch.einsum("bnd,bmd->bnm", norm_slots, norm_slots)
 
+            slot_mask_matrix = slot_mask[:, :, None] & slot_mask[:, None, :]
+            cosine_distance = cosine_distance.masked_fill(~slot_mask_matrix, 2.0)
+
             adjacency_matrix = (cosine_distance < self.distance_threshold).float()
+            adjacency_matrix *= slot_mask_matrix.float()
+
             for _ in range(math.ceil(math.log2(self.n_slots))):
                 adjacency_matrix = torch.clamp(
                     adjacency_matrix @ adjacency_matrix, max=1
                 )
+                adjacency_matrix *= slot_mask_matrix.float()
 
             cumsum = adjacency_matrix.cumsum(dim=1)
             cluster_mask = adjacency_matrix * (cumsum <= 1)
+
             counts = cluster_mask.any(dim=2).sum(dim=1)
             reset_idx = counts < 2
 
-            cluster_mask[reset_idx] = torch.eye(
-                self.n_slots,
-                device=cluster_mask.device,
-                dtype=cluster_mask.dtype,
+            eye = torch.eye(
+                self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
             )[None]
+            eye = eye * slot_mask[:, :, None].float()
+            cluster_mask[reset_idx] = eye[reset_idx]
 
             cluster_weight = cluster_mask / torch.clamp(
                 cluster_mask.sum(dim=2, keepdim=True), min=1
@@ -179,11 +208,11 @@ class SA(nn.Module):
 
         cluster_means = torch.bmm(cluster_weight, slots)
         cluster_attn = torch.bmm(cluster_mask, attn)
-        cluster_mask = cluster_mask.any(dim=2)
+        cluster_mask = cluster_mask.any(dim=2) & slot_mask
 
         return cluster_means, cluster_attn, cluster_mask
 
-    def forward(self, x, n_slots=8, context_mask=None):
+    def forward(self, x, n_slots, context_mask=None):
 
         x = self.norm_input(x)
 
@@ -193,22 +222,28 @@ class SA(nn.Module):
         k = self.inv_cross_k(x)
         v = self.inv_cross_v(x)
 
-        for _ in range(self.n_iters):
+        slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
+
+        cluster_interval = 3
+
+        for i in range(self.n_iters):
             slots, attn_map = self.step(
                 slots,
                 k,
                 v,
                 context_mask=context_mask,
+                slot_mask=slot_mask,
                 return_attn=True,
             )
-
-        slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
+            if (
+                (i + 1) % cluster_interval == 0 or i == self.n_iters - 1
+            ) and self.distance_threshold is not None:
+                slots, attn_map, slot_mask = self.cluster_slots_vectorized(
+                    slots, attn_map, slot_mask=slot_mask
+                )
 
         if self.implicit:
-            slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
-
-        if self.cluster_pre and self.distance_threshold is not None:
-            slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+            slots = slots.detach() - init_slots.detach() + init_slots
 
         slots, attn_map = self.step(
             slots,
@@ -219,9 +254,54 @@ class SA(nn.Module):
             context_mask=context_mask,
         )
 
-        if not self.cluster_pre and self.distance_threshold is not None:
-            slots, attn_map, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+        if self.distance_threshold is not None:
+            slots, attn_map, slot_mask = self.cluster_slots_vectorized(
+                slots, attn_map, slot_mask=slot_mask
+            )
 
         attn_map = rearrange(attn_map, "b n hw -> b hw n")
 
         return slots, attn_map, slot_mask
+
+    # def forward(self, x, n_slots, context_mask=None):
+    #
+    #     x = self.norm_input(x)
+    #
+    #     init_slots = self.sample(x, n_slots)
+    #     slots = init_slots.clone()
+    #
+    #     k = self.inv_cross_k(x)
+    #     v = self.inv_cross_v(x)
+    #
+    #     for _ in range(self.n_iters):
+    #         slots, attn_map = self.step(
+    #             slots,
+    #             k,
+    #             v,
+    #             context_mask=context_mask,
+    #             return_attn=True,
+    #         )
+    #
+    #     slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
+    #
+    #     if self.implicit:
+    #         slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
+    #
+    #     if self.cluster_pre and self.distance_threshold is not None:
+    #         slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+    #
+    #     slots, attn_map = self.step(
+    #         slots,
+    #         k,
+    #         v,
+    #         return_attn=True,
+    #         slot_mask=slot_mask,
+    #         context_mask=context_mask,
+    #     )
+    #
+    #     if not self.cluster_pre and self.distance_threshold is not None:
+    #         slots, attn_map, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+    #
+    #     attn_map = rearrange(attn_map, "b n hw -> b hw n")
+    #
+    #     return slots, attn_map, slot_mask
