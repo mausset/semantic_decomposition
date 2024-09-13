@@ -1,3 +1,4 @@
+from functools import cache
 import json
 import os
 from random import Random
@@ -19,7 +20,7 @@ from torchvision.transforms.v2 import (
 
 
 class YTVIS(Dataset):
-    def __init__(self, file_root, sequence_length, resolution, split="train"):
+    def __init__(self, file_root, sequence_length, resolution, split="train", repeat=1):
         """
         Args:
             file_root (string): Directory with all the video folders.
@@ -28,6 +29,8 @@ class YTVIS(Dataset):
         self.file_root = file_root
         self.sequence_length = sequence_length
         self.split = split
+        self.repeat = repeat
+
         self.transform = Compose(
             [
                 Resize(resolution[0]),
@@ -99,16 +102,22 @@ class YTVIS(Dataset):
             max_length >= sequence_length
         ), "Sequence length is longer than the longest video."
 
+    @cache
     def __len__(self):
-        return sum(
-            [
-                max(len(video) - self.sequence_length + 1, 1)
-                for video in self.video_sequences
-            ]
+        return (
+            sum(
+                [
+                    max(len(video) - self.sequence_length + 1, 1)
+                    for video in self.video_sequences
+                ]
+            )
+            * self.repeat
         )
 
     def idx_to_video(self, idx):
         """Returns the video folder and starting index for a given sequence index"""
+
+        idx = idx % (len(self) // self.repeat)
 
         video_idx = 0
         while idx >= max(

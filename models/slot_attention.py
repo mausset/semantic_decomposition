@@ -290,7 +290,7 @@ class SA(nn.Module):
             slots = slots.detach() - init_slots.detach() + init_slots  # type: ignore
 
         if self.cluster_pre and self.distance_threshold is not None:
-            slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)
+            slots, _, slot_mask = self.cluster_slots_vectorized(slots, attn_map)  # type: ignore
 
         slots, attn_map = self.step(
             slots,
