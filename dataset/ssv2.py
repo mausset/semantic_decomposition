@@ -1,13 +1,12 @@
 from pathlib import Path
 
 import lightning as pl
-
-from nvidia.dali.plugin.base_iterator import LastBatchPolicy
-from nvidia.dali.plugin.pytorch import DALIGenericIterator
-from nvidia.dali import pipeline_def  # type: ignore
 import nvidia.dali.fn as fn
 import nvidia.dali.types as types
-
+import torch
+from nvidia.dali import pipeline_def  # type: ignore
+from nvidia.dali.plugin.base_iterator import LastBatchPolicy
+from nvidia.dali.plugin.pytorch import DALIGenericIterator
 
 initial_prefetch_size = 8
 
@@ -62,12 +61,39 @@ def video_pipe(
 
 
 class LightningWrapper(DALIGenericIterator):
-    def __init__(self, *kargs, **kvargs):
-        super().__init__(*kargs, **kvargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def __next__(self):  # type: ignore
         out = super().__next__()
-        return out[0]
+        out = out[0]
+
+        frames = out["frames"]
+        sequence_mask = out["sequence_mask"]
+
+        n_frames = (sequence_mask >= 0).sum(dim=-1).clamp(min=1)
+
+        S = frames.size(1)
+        batch_size = frames.size(0)
+        device = frames.device
+        range_tensor = torch.arange(S, device=device).unsqueeze(0).repeat(batch_size, 1)
+
+        j = range_tensor % n_frames.unsqueeze(1)
+
+        j_expanded = (
+            j.unsqueeze(2)
+            .unsqueeze(3)
+            .unsqueeze(4)
+            .expand(-1, -1, frames.size(2), frames.size(3), frames.size(4))
+        )
+
+        cyclic_frames = torch.gather(frames, 1, j_expanded)
+
+        out["frames"] = cyclic_frames
+        out["n_frames"] = n_frames
+        out["sequence_mask"][:] = 1
+
+        return out
 
 
 class VideoDataset(pl.LightningDataModule):
@@ -77,7 +103,7 @@ class VideoDataset(pl.LightningDataModule):
 
         self.pipeline_config = pipeline_config
         root = Path(pipeline_config["root"])
-        del pipeline_config["root"]
+        del self.pipeline_config["root"]
 
         train_dir = root / "train"
         self.train_files = list(train_dir.glob("**/*.mp4"))
@@ -114,35 +140,35 @@ class VideoDataset(pl.LightningDataModule):
             last_batch_policy=LastBatchPolicy.DROP,
         )
 
-        pipeline_val = video_pipe(
-            **self.pipeline_config,
-            filenames=self.val_files,
-            labels=self.val_labels,
-            device_id=device_id,
-            shard_id=shard_id,
-            num_shards=num_shards,
-        )
-        self.val_loader = LightningWrapper(
-            pipeline_val,
-            reader_name="Reader",
-            output_map=["frames", "labels", "sequence_mask"],
-            last_batch_policy=LastBatchPolicy.DROP,
-        )
-
-        pipeline_test = video_pipe(
-            **self.pipeline_config,
-            filenames=self.test_files,
-            labels=self.test_labels,
-            device_id=device_id,
-            shard_id=shard_id,
-            num_shards=num_shards,
-        )
-        self.test_loader = LightningWrapper(
-            pipeline_test,
-            reader_name="Reader",
-            output_map=["frames", "labels", "sequence_mask"],
-            last_batch_policy=LastBatchPolicy.DROP,
-        )
+        # pipeline_val = video_pipe(
+        #     **self.pipeline_config,
+        #     filenames=self.val_files,
+        #     labels=self.val_labels,
+        #     device_id=device_id,
+        #     shard_id=shard_id,
+        #     num_shards=num_shards,
+        # )
+        # self.val_loader = LightningWrapper(
+        #     pipeline_val,
+        #     reader_name="Reader",
+        #     output_map=["frames", "labels", "sequence_mask"],
+        #     last_batch_policy=LastBatchPolicy.DROP,
+        # )
+        #
+        # pipeline_test = video_pipe(
+        #     **self.pipeline_config,
+        #     filenames=self.test_files,
+        #     labels=self.test_labels,
+        #     device_id=device_id,
+        #     shard_id=shard_id,
+        #     num_shards=num_shards,
+        # )
+        # self.test_loader = LightningWrapper(
+        #     pipeline_test,
+        #     reader_name="Reader",
+        #     output_map=["frames", "labels", "sequence_mask"],
+        #     last_batch_policy=LastBatchPolicy.DROP,
+        # )
 
         print("Video dataset setup complete.")
 
