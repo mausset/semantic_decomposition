@@ -93,6 +93,7 @@ class MOVIe(Dataset):
 
         out = {}
         out["frames"] = self.transform(torch.stack(frames))
+        out["sequence_mask"] = torch.ones(self.sequence_length).bool()
 
         if self.split == "validation" or self.split == "test":
             mask_paths = [path.replace("images", "masks") for path in frame_paths]
