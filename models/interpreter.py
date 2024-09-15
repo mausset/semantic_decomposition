@@ -384,7 +384,10 @@ class InterpreterTrainer(pl.LightningModule):
             v.reset()
 
     def on_train_epoch_end(self):
-        if self.gif is not None:
+        if (
+            self.gif is not None
+            and self.current_epoch % self.log_config.get("epoch_stride", 1) == 0
+        ):
             self.gif = None
 
     def training_step(self, x, batch_idx: int):  # type: ignore
