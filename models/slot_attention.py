@@ -153,7 +153,7 @@ class SA(nn.Module):
             cluster_mask = adjacency_matrix * (cumsum <= 1)
 
             counts = cluster_mask.any(dim=2).sum(dim=1)
-            reset_idx = counts < 2
+            reset_idx = counts < 3
 
             eye = torch.eye(
                 self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
@@ -199,7 +199,7 @@ class SA(nn.Module):
             cluster_mask = adjacency_matrix * (cumsum <= 1)
 
             counts = cluster_mask.any(dim=2).sum(dim=1)
-            reset_idx = counts < 2
+            reset_idx = counts < 3
 
             eye = torch.eye(
                 self.n_slots, device=cluster_mask.device, dtype=cluster_mask.dtype
