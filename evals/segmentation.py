@@ -68,16 +68,14 @@ patch_size = model.base.patch_size
 
 for batch in tqdm(ytvis):
     frames = batch["frames"].to("cuda")
+    n_frames = batch["n_frames"]
+    sequence_mask = batch["sequence_mask"].to("cuda")
     masks = batch["masks"].to("cuda").long().squeeze(2)
 
     with torch.no_grad():
-        _, attn = model.forward_features(frames)
+        _, attn = model.forward_features(frames, sequence_mask)
 
-    # attn_plot = plot_attention_hierarchical(frames, attn, (336, 504), patch_size)
-    # print(attn_plot[1].shape)
-    # exit()
-
-    attn = propagate_attention(attn)[-1]
+    attn = propagate_attention(attn)[-1][:n_frames]
 
     attn = rearrange(
         attn,

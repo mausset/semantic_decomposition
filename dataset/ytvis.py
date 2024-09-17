@@ -167,11 +167,7 @@ class YTVIS(Dataset):
                 [decode_png(read_file(mask_path)) for mask_path in mask_paths]
             )
 
-            masks = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
-            masks = torch.cat(
-                [masks, torch.zeros(padding, *masks.shape[1:], dtype=masks.dtype)],
-                dim=0,
-            )
+            out["masks"] = self.mask_transform(masks).to(dtype=torch.uint8).squeeze(0)
 
         return out
 

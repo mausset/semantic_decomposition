@@ -2,8 +2,9 @@ import math
 
 import torch
 from einops import rearrange, repeat
-from models.components import GaussianDependent, GaussianPrior
+from models.components import GaussianPrior
 from torch import nn
+from sklearn.cluster import AgglomerativeClustering
 
 
 class SA(nn.Module):
@@ -17,7 +18,6 @@ class SA(nn.Module):
         distance_threshold=None,
         linkage="single",
         implicit=True,
-        interleave_interval=0,
         cluster_pre=False,
         sampler="gaussian",
         eps=1e-8,
@@ -28,20 +28,14 @@ class SA(nn.Module):
         self.n_iters = n_iters
         self.n_slots = n_slots
         self.distance_threshold = distance_threshold
-        self.interleave_interval = interleave_interval
         self.cluster_pre = cluster_pre
         self.implicit = implicit
         self.eps = eps
 
         self.scale = input_dim**-0.5
 
-        if interleave_interval > 0:
-            assert n_iters % interleave_interval == 0
-
         if sampler == "gaussian":
             self.sampler = GaussianPrior(slot_dim)
-        elif sampler == "gaussian_dependent":
-            self.sampler = GaussianDependent(slot_dim)
         elif sampler == "embedding":
             self.sampler = nn.Parameter(torch.randn(n_slots, slot_dim))
 
@@ -49,6 +43,8 @@ class SA(nn.Module):
             self.cluster_slots_vectorized = self.cluster_slots_vectorized_single
         elif linkage == "complete":
             self.cluster_slots_vectorized = self.cluster_slots_vectorized_complete
+        elif linkage == "sklearn":
+            self.cluster_slots_vectorized = self.cluster_slots
 
         self.inv_cross_k = nn.Linear(input_dim, slot_dim, bias=False)
         self.inv_cross_v = nn.Linear(input_dim, slot_dim, bias=False)
@@ -217,55 +213,36 @@ class SA(nn.Module):
 
         return cluster_means, cluster_attn, cluster_mask
 
-    def forward_interleaved(self, x, n_slots, context_mask=None):
+    def cluster_slots(self, slots, attn):
+        b, n, _ = slots.shape
 
-        x = self.norm_input(x)
+        cluster_means = torch.zeros_like(slots, device=slots.device)
+        cluster_attn = torch.zeros_like(attn, device=slots.device)
+        mask = torch.zeros(b, n, device=slots.device, dtype=torch.bool)
+        for i in range(b):
+            labels = AgglomerativeClustering(
+                metric="cosine",
+                compute_full_tree=True,  # type: ignore
+                linkage="complete",
+                n_clusters=None,  # type: ignore
+                distance_threshold=self.distance_threshold,
+            ).fit_predict(slots[i].cpu().detach().numpy())
 
-        init_slots = self.sample(x, n_slots)
-        slots = init_slots.clone()
+            if labels.max() < 2:
+                cluster_means[i] = slots[i]
+                cluster_attn[i] = attn[i]
+                mask[i] = True
+                continue
 
-        k = self.inv_cross_k(x)
-        v = self.inv_cross_v(x)
+            mask[i, : labels.max() + 1] = True
+            for j in range(labels.max() + 1):
+                cluster_mask = torch.tensor(labels == j, device=slots.device)
+                cluster_means[i, j] = slots[i, cluster_mask].mean(dim=0)
+                cluster_attn[i, j] = attn[i, cluster_mask].sum(dim=0)
 
-        slot_mask = torch.ones(x.shape[0], n_slots, device=x.device, dtype=torch.bool)
-
-        cluster_interval = 3
-
-        for i in range(self.n_iters):
-            slots, attn_map = self.step(
-                slots,
-                k,
-                v,
-                context_mask=context_mask,
-                slot_mask=slot_mask,
-                return_attn=True,
-            )
-            if (
-                (i + 1) % cluster_interval == 0 and i != self.n_iters - 1
-            ) and self.distance_threshold is not None:
-                slots, attn_map, slot_mask = self.cluster_slots_vectorized(
-                    slots, attn_map, slot_mask=slot_mask
-                )
-
-        if self.implicit:
-            slots = slots.detach() - init_slots.detach() + init_slots
-
-        slots, attn_map = self.step(
-            slots,
-            k,
-            v,
-            return_attn=True,
-            slot_mask=slot_mask,
-            context_mask=context_mask,
-        )
-
-        attn_map = rearrange(attn_map, "b n hw -> b hw n")
-
-        return slots, attn_map, slot_mask
+        return cluster_means, cluster_attn, mask
 
     def forward(self, x, n_slots, context_mask=None):
-        if self.interleave_interval > 1:
-            return self.forward_interleaved(x, n_slots, context_mask)
 
         x = self.norm_input(x)
 
