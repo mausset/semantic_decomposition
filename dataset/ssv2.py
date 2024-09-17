@@ -71,7 +71,7 @@ class LightningWrapper(DALIGenericIterator):
         frames = out["frames"]
         sequence_mask = out["sequence_mask"]
 
-        n_frames = (sequence_mask >= 0).sum(dim=-1).clamp(min=1)
+        n_frames = sequence_mask.sum(dim=-1).clamp(min=1)
 
         S = frames.size(1)
         batch_size = frames.size(0)
@@ -140,35 +140,35 @@ class VideoDataset(pl.LightningDataModule):
             last_batch_policy=LastBatchPolicy.DROP,
         )
 
-        # pipeline_val = video_pipe(
-        #     **self.pipeline_config,
-        #     filenames=self.val_files,
-        #     labels=self.val_labels,
-        #     device_id=device_id,
-        #     shard_id=shard_id,
-        #     num_shards=num_shards,
-        # )
-        # self.val_loader = LightningWrapper(
-        #     pipeline_val,
-        #     reader_name="Reader",
-        #     output_map=["frames", "labels", "sequence_mask"],
-        #     last_batch_policy=LastBatchPolicy.DROP,
-        # )
-        #
-        # pipeline_test = video_pipe(
-        #     **self.pipeline_config,
-        #     filenames=self.test_files,
-        #     labels=self.test_labels,
-        #     device_id=device_id,
-        #     shard_id=shard_id,
-        #     num_shards=num_shards,
-        # )
-        # self.test_loader = LightningWrapper(
-        #     pipeline_test,
-        #     reader_name="Reader",
-        #     output_map=["frames", "labels", "sequence_mask"],
-        #     last_batch_policy=LastBatchPolicy.DROP,
-        # )
+        pipeline_val = video_pipe(
+            **self.pipeline_config,
+            filenames=self.val_files,
+            labels=self.val_labels,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+        )
+        self.val_loader = LightningWrapper(
+            pipeline_val,
+            reader_name="Reader",
+            output_map=["frames", "labels", "sequence_mask"],
+            last_batch_policy=LastBatchPolicy.DROP,
+        )
+
+        pipeline_test = video_pipe(
+            **self.pipeline_config,
+            filenames=self.test_files,
+            labels=self.test_labels,
+            device_id=device_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+        )
+        self.test_loader = LightningWrapper(
+            pipeline_test,
+            reader_name="Reader",
+            output_map=["frames", "labels", "sequence_mask"],
+            last_batch_policy=LastBatchPolicy.DROP,
+        )
 
         print("Video dataset setup complete.")
 
