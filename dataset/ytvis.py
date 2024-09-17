@@ -20,7 +20,14 @@ from torchvision.transforms.v2 import (
 
 
 class YTVIS(Dataset):
-    def __init__(self, file_root, sequence_length, resolution, split="train", repeat=1):
+    def __init__(
+        self,
+        file_root,
+        sequence_length,
+        resolution,
+        split="train",
+        repeat="repeat_frames",
+    ):
         """
         Args:
             file_root (string): Directory with all the video folders.
@@ -104,20 +111,15 @@ class YTVIS(Dataset):
 
     @cache
     def __len__(self):
-        return (
-            sum(
-                [
-                    max(len(video) - self.sequence_length + 1, 1)
-                    for video in self.video_sequences
-                ]
-            )
-            * self.repeat
+        return sum(
+            [
+                max(len(video) - self.sequence_length + 1, 1)
+                for video in self.video_sequences
+            ]
         )
 
     def idx_to_video(self, idx):
         """Returns the video folder and starting index for a given sequence index"""
-
-        idx = idx % (len(self) // self.repeat)
 
         video_idx = 0
         while idx >= max(
@@ -137,6 +139,21 @@ class YTVIS(Dataset):
 
         return new_frames[: self.sequence_length]
 
+    def repeat_frames(self, frames):
+        if len(frames) == self.sequence_length:
+            return frames
+
+        total_items = len(frames)
+        expansion_factor = (self.sequence_length // total_items) + 1
+
+        expanded_list = [item for item in frames for _ in range(expansion_factor)]
+
+        start_index = torch.randint(
+            0, len(expanded_list) - self.sequence_length, (1,)
+        ).item()
+
+        return expanded_list[start_index : start_index + self.sequence_length]
+
     def __getitem__(self, idx):
         video_idx, start_idx = self.idx_to_video(idx)
 
@@ -148,7 +165,10 @@ class YTVIS(Dataset):
         frames = [decode_jpeg(read_file(frame_path)) for frame_path in frame_paths]
         out["n_frames"] = len(frames)
 
-        frames = self.repeat_sequence(frames)
+        if self.repeat == "repeat_sequence":
+            frames = self.repeat_sequence(frames)
+        elif self.repeat == "repeat_frames":
+            frames = self.repeat_frames(frames)
 
         padding = self.sequence_length - len(frames)
         frames = self.transform(torch.stack(frames))
