@@ -49,7 +49,8 @@ def video_pipe(
     std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
     videos = fn.crop_mirror_normalize(  # type: ignore
         videos,  # type: ignore
-        crop=resolution,
+        crop_h=resolution[0],
+        crop_w=resolution[1],
         dtype=types.FLOAT,  # type: ignore
         mean=mean,
         std=std,
@@ -121,9 +122,14 @@ class VideoDataset(pl.LightningDataModule):
 
     def setup(self, stage=None):  # type: ignore
         print("Setting up video dataset...")
-        device_id = self.trainer.local_rank  # type: ignore
-        shard_id = self.trainer.global_rank  # type: ignore
-        num_shards = self.trainer.world_size  # type: ignore
+        if self.trainer is not None:
+            device_id = self.trainer.local_rank  # type: ignore
+            shard_id = self.trainer.global_rank  # type: ignore
+            num_shards = self.trainer.world_size  # type: ignore
+        else:
+            device_id = 0
+            shard_id = 0
+            num_shards = 1
 
         pipeline_train = video_pipe(
             **self.pipeline_config,
