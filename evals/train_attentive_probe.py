@@ -94,9 +94,7 @@ def load_pretrained_model(config, checkpoint_path, device):
     # Load the state dictionary
     state_dict = torch.load(checkpoint_path, map_location=device)["state_dict"]
     # Remove the 'module.' prefix if present (common with DataParallel)
-    state_dict = {
-        k[6:] if k.startswith("module.") else k: v for k, v in state_dict.items()
-    }
+    state_dict = {k[6:]: v for k, v in state_dict.items()}
 
     # Remove decoder keys if present
     decoder_keys = [k for k in state_dict.keys() if "decoder" in k]
