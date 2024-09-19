@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.optim.adamw import AdamW
-from torchmetrics import Accuracy
 from omegaconf import OmegaConf
 from tqdm import tqdm
 
@@ -239,8 +238,8 @@ def prepare_dataloader(
     # Get other pipeline parameters from config
     pipeline_config = config.data.init_args.pipeline_config.copy()
     del pipeline_config["root"]
-    del pipeline_config["batch_size"]
-    del pipeline_config["num_threads"]
+    pipeline_config.pop("batch_size", None)
+    pipeline_config.pop("num_threads", None)
 
     # Create the DALI pipeline
     pipeline = video_pipe(
@@ -311,17 +310,7 @@ def main():
             probe, device_ids=[local_rank], output_device=local_rank
         )
 
-    # Prepare the training DataLoader
-    if distributed:
-        per_process_batch_size = args.batch_size // world_size
-    else:  # Single GPU mode
-        per_process_batch_size = args.batch_size
-    if per_process_batch_size < 1:
-        if is_main:
-            print(
-                f"Warning: per-process batch size {per_process_batch_size} < 1. Setting to 1."
-            )
-        per_process_batch_size = 1
+    per_process_batch_size = args.batch_size
 
     train_loader = prepare_dataloader(
         config,
@@ -356,22 +345,26 @@ def main():
         final_lr=0.0,
     )
 
-    # Initialize TorchMetrics' Accuracy
-    accuracy_metric = Accuracy(task="multiclass", num_classes=num_classes).to(device)
-
     # Gradient Accumulation Steps
     accumulation_steps = args.accumulation_steps
     if accumulation_steps < 1:
         if is_main:
             print("Error: accumulation_steps must be at least 1")
-        cleanup_distributed()
+        if distributed:
+            cleanup_distributed()
         raise ValueError("accumulation_steps must be at least 1")
 
     # Training loop
     for epoch in range(1, args.epochs + 1):
         probe.train()
         epoch_loss = 0.0
-        accuracy_metric.reset()
+
+        # Initialize accuracy tracking variables
+        epoch_correct_predictions = 0
+        epoch_total_predictions = 0
+
+        running_accuracies = []
+        running_acc_window = 50  # Adjust the window size as needed
 
         if is_main:
             progress_bar = tqdm(
@@ -408,7 +401,19 @@ def main():
 
             # Compute accuracy
             preds = outputs.argmax(dim=1)
-            accuracy_metric.update(preds, labels)
+            correct = (preds == labels).sum().item()
+            total = labels.size(0)
+
+            epoch_correct_predictions += correct
+            epoch_total_predictions += total
+
+            # Update running accuracies
+            batch_acc = correct / total
+            running_accuracies.append(batch_acc)
+            if len(running_accuracies) > running_acc_window:
+                running_accuracies.pop(0)
+
+            running_acc = sum(running_accuracies) / len(running_accuracies)
 
             epoch_loss += loss.item() * accumulation_steps  # Accumulate the actual loss
 
@@ -418,9 +423,11 @@ def main():
                 optimizer.zero_grad()
 
             if is_main and (batch_idx + 1) % accumulation_steps == 0:
-                current_acc = accuracy_metric.compute().item()
                 progress_bar.set_postfix(  # type: ignore
-                    {"Loss": loss.item() * accumulation_steps, "Acc": current_acc}
+                    {
+                        "Loss": loss.item() * accumulation_steps,
+                        "RAcc": running_acc,
+                    }
                 )
 
         # Handle remaining gradients if the number of batches is not divisible by accumulation_steps
@@ -431,7 +438,16 @@ def main():
 
         # Compute average loss and accuracy for the epoch
         avg_loss = epoch_loss / len(train_loader)
-        avg_acc = accuracy_metric.compute().item()
+
+        # Synchronize accuracy across all processes
+        tensor_correct = torch.tensor(epoch_correct_predictions, dtype=torch.float64, device=device)
+        tensor_total = torch.tensor(epoch_total_predictions, dtype=torch.float64, device=device)
+
+        if distributed:
+            dist.all_reduce(tensor_correct, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tensor_total, op=dist.ReduceOp.SUM)
+
+        avg_acc = tensor_correct.item() / tensor_total.item()
 
         if is_main:
             print(
@@ -482,14 +498,18 @@ def load_pretrained_model(config, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
 
-    state_dict = {k[6:]: v for k, v in state_dict.items()}
+    # Remove the 'module.' prefix if present (common with DataParallel)
+    state_dict = {k[6:] if k.startswith("model.") else k: v for k, v in state_dict.items()}
 
     # Remove decoder keys if present
     decoder_keys = [k for k in state_dict.keys() if "decoder" in k]
     for k in decoder_keys:
         del state_dict[k]
 
-    del state_dict["base.model.pos_embed"]
+    # Remove the positional embedding if necessary
+    if "base.model.pos_embed" in state_dict:
+        del state_dict["base.model.pos_embed"]
+
     # Load the state dict into the model
     model.load_state_dict(state_dict, strict=False)
 
@@ -502,3 +522,4 @@ def load_pretrained_model(config, checkpoint_path, device):
 
 if __name__ == "__main__":
     main()
+
