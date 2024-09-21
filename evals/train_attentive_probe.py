@@ -1,28 +1,123 @@
 import argparse
-import math
 import os
 import warnings
+from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from dataset.ssv2 import VideoDataset
+import torch.distributed as dist
+from torch.optim.adamw import AdamW
+from omegaconf import OmegaConf
+from tqdm import tqdm
+
+# Import NVIDIA DALI components
+import nvidia.dali.fn as fn
+import nvidia.dali.types as types
+from nvidia.dali.plugin.base_iterator import LastBatchPolicy
+from nvidia.dali.plugin.pytorch import DALIGenericIterator
+from nvidia.dali import pipeline_def  # type: ignore
+
+# Import your model components
 from models.attentive_pooler import AttentiveClassifier
 from models.interpreter import Interpreter
-from omegaconf import OmegaConf
-from torch.optim.adamw import AdamW
-from torch.utils.data import DataLoader
-from torchmetrics import Accuracy
-from tqdm import tqdm
 from utils.schedulers import WarmupCosineSchedule
 
+# Suppress unnecessary warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 warnings.simplefilter(action="ignore", category=UserWarning)
+
+initial_prefetch_size = 8
+
+
+@pipeline_def
+def video_pipe(
+    filenames=[],
+    labels=[],
+    resolution=(224, 224),
+    sequence_length=16,
+    stride=1,
+    step=1,
+    shuffle=True,
+    shard_id=0,
+    num_shards=1,
+):
+    videos, labels, timestamps = fn.readers.video_resize(  # type: ignore
+        device="gpu",
+        filenames=filenames,
+        labels=labels,
+        resize_shorter=resolution[0],
+        sequence_length=sequence_length,
+        enable_timestamps=True,
+        pad_sequences=True,
+        shard_id=shard_id,
+        stride=stride,
+        step=step,
+        num_shards=num_shards,
+        random_shuffle=shuffle,
+        name="Reader",
+        initial_fill=initial_prefetch_size,
+        prefetch_queue_depth=1,
+        file_list_include_preceding_frame=True,
+    )
+
+    sequence_mask = timestamps >= 0
+
+    coin = fn.random.coin_flip(probability=0.5)
+    mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
+    std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+    videos = fn.crop_mirror_normalize(
+        videos,
+        crop_h=resolution[0],
+        crop_w=resolution[1],
+        dtype=types.FLOAT,  # type: ignore
+        mean=mean,
+        std=std,
+        output_layout="FCHW",
+        mirror=coin,
+    )
+
+    return videos, labels, sequence_mask
+
+
+class LightningWrapper(DALIGenericIterator):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __next__(self):  # type: ignore
+        out = super().__next__()
+        out = out[0]
+
+        frames = out["frames"]
+        sequence_mask = out["sequence_mask"]
+
+        n_frames = sequence_mask.sum(dim=-1).clamp(min=1)
+
+        S = frames.size(1)
+        batch_size = frames.size(0)
+        device = frames.device
+        range_tensor = torch.arange(S, device=device).unsqueeze(0).repeat(batch_size, 1)
+
+        j = range_tensor % n_frames.unsqueeze(1)
+
+        j_expanded = (
+            j.unsqueeze(2)
+            .unsqueeze(3)
+            .unsqueeze(4)
+            .expand(-1, -1, frames.size(2), frames.size(3), frames.size(4))
+        )
+
+        cyclic_frames = torch.gather(frames, 1, j_expanded)
+
+        out["frames"] = cyclic_frames
+        out["n_frames"] = n_frames
+        out["sequence_mask"][:] = 1
+
+        return out
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train Attentive Probe with AdamW Optimizer, Cosine Decay Scheduler, and Gradient Accumulation"
+        description="Train Attentive Probe with AdamW Optimizer, Cosine Decay Scheduler, Gradient Accumulation, and DALI Data Loader using DDP"
     )
     parser.add_argument(
         "--config",
@@ -46,7 +141,10 @@ def parse_args():
         "--epochs", type=int, default=20, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=12, help="Batch size for training"
+        "--batch_size",
+        type=int,
+        default=256,
+        help="Total batch size for training across all GPUs",
     )
     parser.add_argument(
         "--accumulation_steps",
@@ -79,58 +177,104 @@ def parse_args():
     return args
 
 
-def load_pretrained_model(config, checkpoint_path, device):
+def setup_distributed():
     """
-    Loads the pretrained Interpreter model, removes decoder keys, and freezes its parameters.
+    Initializes the distributed training environment.
     """
-    # Initialize the Interpreter model
-    model = Interpreter(
-        config.model.init_args.base_config,
-        config.model.init_args.block_configs,
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        # Distributed mode
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+        )
+        distributed = True
+    else:
+        # Single GPU mode
+        print("Not using distributed mode")
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        distributed = False
+
+    return rank, world_size, device, local_rank, distributed
+
+
+def cleanup_distributed():
+    """
+    Cleans up the distributed training environment.
+    """
+    dist.destroy_process_group()
+
+
+def prepare_dataloader(
+    config, batch_size, num_workers, split, device_id, shard_id, num_shards
+):
+    """
+    Prepares the DALI DataLoader for the specified dataset split.
+    """
+    # Read the filenames and labels for the specified split
+    root = Path(config.data.init_args.pipeline_config["root"])
+    if split == "train":
+        data_dir = root / "train"
+    elif split == "val":
+        data_dir = root / "validation"
+    elif split == "test":
+        data_dir = root / "test"
+    else:
+        raise ValueError(f"Unknown split: {split}")
+
+    filenames = sorted(list(data_dir.glob("**/*.mp4")))
+    labels = [int(f.parent.name) for f in filenames]
+
+    # Get other pipeline parameters from config
+    pipeline_config = config.data.init_args.pipeline_config.copy()
+    del pipeline_config["root"]
+    pipeline_config.pop("batch_size", None)
+    pipeline_config.pop("num_threads", None)
+
+    # Create the DALI pipeline
+    pipeline = video_pipe(
+        **pipeline_config,
+        filenames=filenames,
+        labels=labels,
+        shard_id=shard_id,
+        num_shards=num_shards,
+        seed=12 + shard_id,
+        batch_size=batch_size,
+        num_threads=num_workers,
+        device_id=device_id,
     )
-    model = model.to(device)
-    model.eval()
 
-    # Load the state dictionary
-    state_dict = torch.load(checkpoint_path, map_location=device)["state_dict"]
-    # Remove the 'module.' prefix if present (common with DataParallel)
-    state_dict = {k[6:]: v for k, v in state_dict.items()}
+    # Create the DALI DataLoader
+    data_loader = LightningWrapper(
+        pipeline,
+        reader_name="Reader",
+        output_map=["frames", "labels", "sequence_mask"],
+        last_batch_policy=LastBatchPolicy.DROP,
+        auto_reset=True,
+    )
 
-    # Remove decoder keys if present
-    decoder_keys = [k for k in state_dict.keys() if "decoder" in k]
-    for k in decoder_keys:
-        del state_dict[k]
-
-    # Load the state dict into the model
-    model.load_state_dict(state_dict, strict=False)
-
-    # Freeze all parameters
-    for param in model.parameters():
-        param.requires_grad = False
-
-    return model
-
-
-def prepare_dataloader(config, batch_size, num_workers, split="train"):
-    """
-    Prepares the DataLoader for the specified dataset split.
-    """
-    # Initialize the dataset (assuming training split)
-    pipeline_config = config.data.init_args.pipeline_config
-    pipeline_config["batch_size"] = batch_size
-    ssv2_lightning = VideoDataset(pipeline_config)
-    ssv2_lightning.setup()
-    dataloader = ssv2_lightning.train_dataloader()
-
-    return dataloader
+    return data_loader
 
 
 def main():
     args = parse_args()
 
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Setup distributed training
+    rank, world_size, device, local_rank, distributed = setup_distributed()
+    is_main = rank == 0
+
+    if is_main:
+        print(f"Training on rank {rank} out of {world_size} processes.")
 
     # Load configuration
     config = OmegaConf.load(args.config)
@@ -141,13 +285,12 @@ def main():
     interpreter_model = load_pretrained_model(config, args.checkpoint, device)
 
     # Determine the feature dimension from the config
-    # Adjust based on your config structure
     embed_dim = config.model.init_args.base_config.get(
         "embed_dim", 768
     )  # Default to 768 if not specified
 
     # Initialize the Attentive Classifier (Probe)
-    num_classes = 174
+    num_classes = 174  # Adjust based on your dataset
     probe = AttentiveClassifier(
         embed_dim=embed_dim,
         num_heads=12,  # Adjust as needed
@@ -161,13 +304,26 @@ def main():
     )
     probe = probe.to(device)
 
-    # Prepare the training DataLoader
+    # Wrap the probe with DistributedDataParallel
+    if distributed:
+        probe = nn.parallel.DistributedDataParallel(
+            probe, device_ids=[local_rank], output_device=local_rank
+        )
+
+    per_process_batch_size = args.batch_size
+
     train_loader = prepare_dataloader(
-        config, args.batch_size, args.num_workers, split="train"
+        config,
+        per_process_batch_size,
+        args.num_workers,
+        split="train",
+        device_id=local_rank,
+        shard_id=rank if distributed else 0,
+        num_shards=world_size if distributed else 1,
     )
 
     # Define the loss function
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss().to(device)
 
     # Initialize the AdamW optimizer
     optimizer = AdamW(
@@ -177,7 +333,7 @@ def main():
     )
 
     # Calculate total training steps
-    total_steps = args.epochs * len(train_loader)
+    total_steps = args.epochs * (len(train_loader) // args.accumulation_steps)
 
     # Initialize the WarmupCosineSchedule scheduler
     scheduler = WarmupCosineSchedule(
@@ -189,43 +345,75 @@ def main():
         final_lr=0.0,
     )
 
-    # Initialize TorchMetrics' Accuracy
-    accuracy_metric = Accuracy(task="multiclass", num_classes=num_classes).to(device)
-
     # Gradient Accumulation Steps
     accumulation_steps = args.accumulation_steps
     if accumulation_steps < 1:
+        if is_main:
+            print("Error: accumulation_steps must be at least 1")
+        if distributed:
+            cleanup_distributed()
         raise ValueError("accumulation_steps must be at least 1")
 
+    # Training loop
     for epoch in range(1, args.epochs + 1):
         probe.train()
         epoch_loss = 0.0
-        accuracy_metric.reset()
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
+
+        # Initialize accuracy tracking variables
+        epoch_correct_predictions = 0
+        epoch_total_predictions = 0
+
+        running_accuracies = []
+        running_acc_window = 50  # Adjust the window size as needed
+
+        if is_main:
+            progress_bar = tqdm(
+                enumerate(train_loader),
+                total=len(train_loader),
+                desc=f"Epoch {epoch}/{args.epochs}",
+            )
+        else:
+            progress_bar = enumerate(train_loader)
 
         optimizer.zero_grad()  # Reset gradients at the start of the epoch
 
-        for batch_idx, batch in enumerate(progress_bar):
-            frames = batch["frames"].to(device)
-            labels = batch["labels"].to(device).squeeze(-1).long()
-            sequence_mask = batch["sequence_mask"].to(device)
+        for batch_idx, batch in progress_bar:
+            frames = batch["frames"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True).squeeze(-1).long()
+            sequence_mask = batch.get("sequence_mask", None)
+            if sequence_mask is not None:
+                sequence_mask = sequence_mask.to(device, non_blocking=True)
 
             # Forward pass through the frozen Interpreter to get features
             with torch.no_grad():
                 features, _ = interpreter_model.forward_features(frames, sequence_mask)
 
-            features = features[-1].squeeze(1)
+            features = features[-1].squeeze(
+                1
+            )  # Adjust based on your model's output structure
+
             # Forward pass through the probe
             outputs = probe(features)
 
-            print(labels)
             # Compute loss and scale by accumulation_steps
             loss = criterion(outputs, labels) / accumulation_steps
             loss.backward()
 
             # Compute accuracy
             preds = outputs.argmax(dim=1)
-            accuracy_metric.update(preds, labels)
+            correct = (preds == labels).sum().item()
+            total = labels.size(0)
+
+            epoch_correct_predictions += correct
+            epoch_total_predictions += total
+
+            # Update running accuracies
+            batch_acc = correct / total
+            running_accuracies.append(batch_acc)
+            if len(running_accuracies) > running_acc_window:
+                running_accuracies.pop(0)
+
+            running_acc = sum(running_accuracies) / len(running_accuracies)
 
             epoch_loss += loss.item() * accumulation_steps  # Accumulate the actual loss
 
@@ -234,11 +422,13 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad()
 
-            # Update progress bar with loss and accuracy
-            current_acc = accuracy_metric.compute().item()
-            progress_bar.set_postfix(
-                {"Loss": loss.item() * accumulation_steps, "Acc": current_acc}
-            )
+            if is_main and (batch_idx + 1) % accumulation_steps == 0:
+                progress_bar.set_postfix(  # type: ignore
+                    {
+                        "Loss": loss.item() * accumulation_steps,
+                        "RAcc": running_acc,
+                    }
+                )
 
         # Handle remaining gradients if the number of batches is not divisible by accumulation_steps
         if len(train_loader) % accumulation_steps != 0:
@@ -248,20 +438,31 @@ def main():
 
         # Compute average loss and accuracy for the epoch
         avg_loss = epoch_loss / len(train_loader)
-        avg_acc = accuracy_metric.compute().item()
-        print(
-            f"Epoch [{epoch}/{args.epochs}] - Average Loss: {avg_loss:.4f} - Average Accuracy: {avg_acc:.4f}"
-        )
+
+        # Synchronize accuracy across all processes
+        tensor_correct = torch.tensor(epoch_correct_predictions, dtype=torch.float64, device=device)
+        tensor_total = torch.tensor(epoch_total_predictions, dtype=torch.float64, device=device)
+
+        if distributed:
+            dist.all_reduce(tensor_correct, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tensor_total, op=dist.ReduceOp.SUM)
+
+        avg_acc = tensor_correct.item() / tensor_total.item()
+
+        if is_main:
+            print(
+                f"Epoch [{epoch}/{args.epochs}] - Average Loss: {avg_loss:.4f} - Average Accuracy: {avg_acc:.4f}"
+            )
 
         # Save the probe checkpoint
-        if epoch % args.save_every == 0 or epoch == args.epochs:
+        if is_main and (epoch % args.save_every == 0 or epoch == args.epochs):
             checkpoint_dir = os.path.dirname(args.output)
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint_path = os.path.join(checkpoint_dir, f"probe_epoch_{epoch}.pth")
             torch.save(
                 {
                     "epoch": epoch,
-                    "state_dict": probe.state_dict(),
+                    "state_dict": probe.module.state_dict(),  # unwrap DDP
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "loss": avg_loss,
@@ -271,10 +472,54 @@ def main():
             )
             print(f"Saved checkpoint: {checkpoint_path}")
 
-    # Save the final trained probe
-    torch.save(probe.state_dict(), args.output)
-    print(f"Training completed. Final probe saved to {args.output}")
+    if is_main:
+        # Save the final trained probe
+        torch.save(probe.module.state_dict(), args.output)  # unwrap DDP
+        print(f"Training completed. Final probe saved to {args.output}")
+
+    # Clean up distributed training
+    if distributed:
+        cleanup_distributed()
+
+
+def load_pretrained_model(config, checkpoint_path, device):
+    """
+    Loads the pretrained Interpreter model, removes decoder keys, and freezes its parameters.
+    """
+    # Initialize the Interpreter model
+    model = Interpreter(
+        config.model.init_args.base_config,
+        config.model.init_args.block_configs,
+    )
+    model = model.to(device)
+    model.eval()
+
+    # Load the state dictionary
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+
+    # Remove the 'module.' prefix if present (common with DataParallel)
+    state_dict = {k[6:] if k.startswith("model.") else k: v for k, v in state_dict.items()}
+
+    # Remove decoder keys if present
+    decoder_keys = [k for k in state_dict.keys() if "decoder" in k]
+    for k in decoder_keys:
+        del state_dict[k]
+
+    # Remove the positional embedding if necessary
+    if "base.model.pos_embed" in state_dict:
+        del state_dict["base.model.pos_embed"]
+
+    # Load the state dict into the model
+    model.load_state_dict(state_dict, strict=False)
+
+    # Freeze all parameters
+    for param in model.parameters():
+        param.requires_grad = False
+
+    return model
 
 
 if __name__ == "__main__":
     main()
+
