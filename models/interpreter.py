@@ -136,7 +136,9 @@ class InterpreterBlock(nn.Module):
         if self.encoder is not None:
             regs = repeat(self.registers, "1 n d -> b n d", b=x.shape[0])
             x, ps = pack((x, regs), "b * d")
-            reg_mask = torch.ones(b, self.n_slots, device=self.device).bool()
+            reg_mask = torch.ones(
+                sequence_mask.shape[0], self.n_slots, device=self.device
+            ).bool()
             sequence_mask_w_regs, _ = pack((sequence_mask, reg_mask), "b *")
             x = self.encoder(x, mask=sequence_mask_w_regs)
             x, _ = unpack(x, ps, "b * d")
