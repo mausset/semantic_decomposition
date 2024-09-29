@@ -64,7 +64,7 @@ class InterpreterBlock(nn.Module):
 
         print(f"Decode res: {self.decode_res}")
 
-        self.time_pe = PositionalEncoding1D(self.slot_dim)
+        self.time_pe = nn.Parameter(torch.zeros(1, self.time_shrink, self.dim))
 
         self.slot_attention = SA(
             input_dim=self.dim,
@@ -82,11 +82,11 @@ class InterpreterBlock(nn.Module):
             )
             self.registers = nn.Parameter(torch.zeros(1, self.n_slots, self.dim))
             torch.nn.init.xavier_normal_(self.registers)
+        else:
+            self.encoder = None
             self.pe = nn.Parameter(
                 torch.zeros(1, self.decode_res[0] * self.decode_res[1], self.dim)
             )
-        else:
-            self.encoder = None
 
         self.decoder = Encoder(
             dim=self.dim,
@@ -101,8 +101,7 @@ class InterpreterBlock(nn.Module):
         return next(self.parameters()).device
 
     def _time_pe(self, b, t, n, d):
-        pe = self.time_pe(torch.zeros((b, t, d), device=self.device))
-        return repeat(pe, "b t d -> b t n d", n=n)
+        return repeat(self.time_pe, "b t d -> b t n d", n=n)
 
     def shrink_time(self, x, add_pe=False):
         if self.time_shrink == 1:
@@ -175,6 +174,8 @@ class InterpreterBlock(nn.Module):
 
         if target is None:
             target = repeat(self.pe, "1 n d -> (b 1) n d", b=b)
+        else:
+            target = self.shrink_time(target, add_pe=True)
 
         target = self.decoder(target, context=x, mask=mask, context_mask=context_mask)
         target = rearrange(
