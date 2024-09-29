@@ -4,7 +4,7 @@ import torch
 import wandb
 from einops import rearrange, repeat, pack, unpack
 from geomloss import SamplesLoss
-from models.decoder import TransformerDecoderV2, TransformerDecoderV1
+
 from models.slot_attention import SA
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from torch import nn
@@ -47,7 +47,7 @@ class InterpreterBlock(nn.Module):
     def __init__(
         self,
         config: dict,
-        n_decode: int | tuple[int, int],
+        decode_res: int | tuple[int, int],
     ):
         super().__init__()
         self.dim = config["dim"]
@@ -55,14 +55,7 @@ class InterpreterBlock(nn.Module):
         self.n_slots = config["n_slots"]
         self.time_shrink = config.get("time_shrink", 1)
 
-        if isinstance(n_decode, int):
-            self.decode_res = next(
-                (i, n_decode // i)
-                for i in range(int(n_decode**0.5), 0, -1)
-                if n_decode % i == 0
-            )
-        else:  # Tuple
-            self.decode_res = n_decode
+        self.decode_res = decode_res
         if self.time_shrink > 1:
             self.decode_res = (
                 self.time_shrink,
@@ -89,14 +82,18 @@ class InterpreterBlock(nn.Module):
             )
             self.registers = nn.Parameter(torch.zeros(1, self.n_slots, self.dim))
             torch.nn.init.xavier_normal_(self.registers)
+            self.pe = nn.Parameter(
+                torch.zeros(1, self.decode_res[0] * self.decode_res[1], self.dim)
+            )
         else:
             self.encoder = None
 
-        self.decoder = TransformerDecoderV1(
+        self.decoder = Encoder(
             dim=self.dim,
             depth=config["dec_depth"],
-            resolution=self.decode_res,
-            sincos=True,
+            cross_attend=True,
+            ff_glu=True,
+            attn_flash=True,
         )
 
     @property
@@ -155,7 +152,19 @@ class InterpreterBlock(nn.Module):
 
         return slots, attn_map, mask
 
-    def decode(self, x, mask=None, context_mask=None):
+    def queries(self, attn, queries=None):
+        attn = attn.clone()
+
+        attn = rearrange(attn, "b hw n -> b n hw")
+
+        attn = attn + 1e-8
+        attn = attn / attn.sum(dim=-1, keepdim=True)
+
+        pe = self.pe if queries is None else queries
+
+        return torch.bmm(attn, pe)
+
+    def decode(self, x, target=None, mask=None, context_mask=None):
         b, *_ = x.shape
 
         x = rearrange(x, "b t ... -> (b t) ...")
@@ -164,15 +173,18 @@ class InterpreterBlock(nn.Module):
         if context_mask is not None:
             context_mask = rearrange(context_mask, "b t ... -> (b t) ...")
 
-        x = self.decoder(x, mask=mask, context_mask=context_mask)
-        x = rearrange(
-            x,
+        if target is None:
+            target = repeat(self.pe, "1 n d -> (b 1) n d", b=b)
+
+        target = self.decoder(target, context=x, mask=mask, context_mask=context_mask)
+        target = rearrange(
+            target,
             "(b t) (s n) d -> b (t s) n d",  # Ablate this
             b=b,
             s=self.time_shrink,
         )
 
-        return x
+        return target
 
 
 class Interpreter(nn.Module):
@@ -190,11 +202,13 @@ class Interpreter(nn.Module):
             base_config["resolution"][0] // self.base.patch_size,
             base_config["resolution"][1] // self.base.patch_size,
         )
-        n_decode = base_resolution
+        decode_res = base_resolution
         self.blocks = nn.ModuleList([])
         for i in range(len(block_configs)):
-            self.blocks.append(InterpreterBlock(block_configs[i], n_decode=n_decode))
-            n_decode = block_configs[i]["n_slots"]
+            self.blocks.append(
+                InterpreterBlock(block_configs[i], decode_res=decode_res)
+            )
+            decode_res = block_configs[i]["n_slots"]
 
     def setup_only_last(self):
         for block in self.blocks[:-1]:  # type: ignore
@@ -213,6 +227,7 @@ class Interpreter(nn.Module):
             masks.append(sequence_mask)
             for block in self.blocks[:-1]:  # type: ignore
                 x, attn_map, sequence_mask = block(x, sequence_mask)
+                queries = block.queries(attn_map)
                 attn_maps.append(attn_map)
                 masks.append(sequence_mask)
                 x = x.detach()
@@ -221,7 +236,12 @@ class Interpreter(nn.Module):
         x, attn_map, sequence_mask = self.blocks[-1](x, sequence_mask)
         attn_maps.append(attn_map)
         decoded = [
-            self.blocks[-1].decode(x, mask=masks[-1], context_mask=sequence_mask)
+            self.blocks[-1].decode(
+                x,
+                target=queries,
+                mask=masks[-1],
+                context_mask=sequence_mask,
+            )
         ]
 
         return decoded, features, attn_maps, masks
@@ -259,11 +279,13 @@ class Interpreter(nn.Module):
         attn_maps = []
         features = [x]
         decoded = []
+        queries = None
         for block in blocks:  # type: ignore
             x, attn_map, _ = block(x, sequence_mask)
             features.append(x)
+
             attn_maps.append(attn_map)
-            decoded.append(block.decode(x))
+            decoded.append(block.decode(x, target=queries))
             x = x.detach()
 
         return decoded, features, attn_maps
