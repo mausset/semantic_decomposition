@@ -59,7 +59,7 @@ class InterpreterBlock(nn.Module):
         if self.time_shrink > 1:
             self.decode_res = (
                 self.time_shrink,
-                self.decode_res[0] * self.decode_res[1],
+                self.decode_res,
             )
 
         print(f"Decode res: {self.decode_res}")
@@ -160,6 +160,7 @@ class InterpreterBlock(nn.Module):
         attn = attn / attn.sum(dim=-1, keepdim=True)
 
         pe = self.pe if queries is None else queries
+        pe = repeat(pe, "1 n d -> (b 1) n d", b=attn.shape[0])
 
         return torch.bmm(attn, pe)
 
@@ -176,6 +177,7 @@ class InterpreterBlock(nn.Module):
             target = repeat(self.pe, "1 n d -> (b 1) n d", b=b)
         else:
             target = self.shrink_time(target, add_pe=True)
+            target = rearrange(target, "b t n d -> (b t) n d")
 
         target = self.decoder(target, context=x, mask=mask, context_mask=context_mask)
         target = rearrange(
@@ -230,6 +232,7 @@ class Interpreter(nn.Module):
             for block in self.blocks[:-1]:  # type: ignore
                 x, attn_map, sequence_mask = block(x, sequence_mask)
                 queries = block.queries(attn_map)
+                queries = rearrange(queries, "(b t) n d -> b t n d", b=b)
                 attn_maps.append(attn_map)
                 masks.append(sequence_mask)
                 x = x.detach()
