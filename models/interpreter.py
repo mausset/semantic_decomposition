@@ -65,6 +65,7 @@ class InterpreterBlock(nn.Module):
         print(f"Decode res: {self.decode_res}")
 
         self.time_pe = nn.Parameter(torch.zeros(1, self.time_shrink, self.dim))
+        torch.nn.init.xavier_normal_(self.time_pe)
 
         self.slot_attention = SA(
             input_dim=self.dim,
