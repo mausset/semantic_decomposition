@@ -219,6 +219,7 @@ class Interpreter(nn.Module):
 
         attn_maps = []
         masks = []
+        queries = None
         with torch.no_grad():
             x = rearrange(x, "b t ... -> (b t) ...")
             x = self.base(x)
